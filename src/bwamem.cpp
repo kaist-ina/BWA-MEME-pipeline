@@ -33,6 +33,7 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include "LearnedIndex_seeding.h"
 #include "FMI_search.h"
 #include "memcpy_bwamem.h"
+#include "gpuSWA.h"
 #include <iostream>
 
 //----------------
@@ -59,7 +60,7 @@ KSORT_INIT(mem_smem_sort_lt, mem_t, smem_lt_2)
 #define max_(x, y) ((x)>(y)?(x):(y))
 #define min_(x, y) ((x)>(y)?(y):(x))
             
-#define MAX_BAND_TRY  2
+#define MAX_BAND_TRY  1
 
 // static const unsigned char BitReverseTable256[256] = 
 // {
@@ -131,6 +132,7 @@ mem_opt_t *mem_opt_init()
     o->a = 1; o->b = 4;
     o->o_del = o->o_ins = 6;
     o->e_del = o->e_ins = 1;
+    // o->w = 200;
     o->w = 100;
     o->T = 30;
     o->zdrop = 100;
@@ -461,7 +463,7 @@ static int test_and_merge(const mem_opt_t *opt, int64_t l_pac, mem_chain_t *c,
         return 1; // contained seed; do nothing
     
     if ((last->rbeg < l_pac || c->seeds[0].rbeg < l_pac) &&
-        p->rbeg >= l_pac) return 0; // don't chain if on different strand
+        p->rbeg >= l_pac) return 0; // don't chain if on different strand // check
     
     x = p->qbeg - last->qbeg; // always non-negtive
     y = p->rbeg - last->rbeg;
@@ -596,7 +598,9 @@ void mem_flt_chained_seeds(const mem_opt_t *opt, const bntseq_t *bns, const uint
     }
 }
 
-int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
+int 
+
+mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
 {
     int i, k, n_numc = 0;
     if (n_chn_ == 0) return 0; // no need to filter
@@ -609,6 +613,7 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
         if (c->w < opt->min_chain_weight)
         {
             if (c->m > SEEDS_PER_CHAIN) {
+                // printf_(MY, "\tPE11 access by tid %d - BWT\n", tid);
                 tprof[PE11][tid] ++;
                 free(c->seeds);
             }
@@ -631,6 +636,7 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
             //}
             //else
             {
+                // fprintf(stderr, "pseqid: %d, seqid: %d\n", pseqid, c->seqid);
                 pr.second = i;
                 range.push_back(pr);
                 pr.first = i;
@@ -655,12 +661,14 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
         // pairwise chain comparisons
         a[0].kept = 3;
         kv_push(int, chains, 0);
+        int cnt = 0;
         for (i = 1; i < n_chn; ++i)
         {
             int large_ovlp = 0;
             for (k = 0; k < chains.n; ++k)
             {
                 int j = chains.a[k];
+                cnt++;
                 int b_max = chn_beg(a[j]) > chn_beg(a[i])? chn_beg(a[j]) : chn_beg(a[i]);
                 int e_min = chn_end(a[j]) < chn_end(a[i])? chn_end(a[j]) : chn_end(a[i]);
                 if (e_min > b_max && (!a[j].is_alt || a[i].is_alt)) { // have overlap; don't consider ovlp where the kept chain is ALT while the current chain is primary
@@ -681,6 +689,7 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
                 a[i].kept = large_ovlp? 2 : 3;
             }
         }
+        // fprintf(stderr, "n_chn: %d, chains.n: %d, cnt: %d\n", n_chn, chains.n, cnt);
         for (i = 0; i < chains.n; ++i)
         {
             mem_chain_t *c = &a[chains.a[i]];
@@ -715,7 +724,7 @@ int mem_chain_flt(const mem_opt_t *opt, int n_chn_, mem_chain_t *a_, int tid)
 
     return n_numc;
 }
-
+/* Find SMEM */
 SMEM *mem_collect_smem(FMI_search *fmi, const mem_opt_t *opt,
                        const bseq1_t *seq_,
                        int nseq,
@@ -868,7 +877,7 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
     int64_t i, pos = 0;
     int64_t smem_ptr = 0;
     int64_t l_pac = bns->l_pac;
-    
+    // fprintf(stderr, "mem_chain_seeds, nseq: %d, tid: %d, num_smem: %d\n", nseq, tid, num_smem);
     int num[nseq];
     memset_s(num, nseq*sizeof(int), 0);
     int smem_buf_size = 6000;
@@ -910,7 +919,7 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
             else e = e > se? e : se;
         } while (pos < num_smem - 1 && matchArray[pos].rid == matchArray[pos + 1].rid);
         l_rep += e - b;
-
+        // fprintf(stderr, "pos: %d, smem_ptr: %d, l_rep: %d\n", pos, smem_ptr, l_rep);
         // bwt_sa
         // assert(pos - smem_ptr + 1 < 6000);
         if (pos - smem_ptr + 1 >= smem_buf_size)
@@ -929,8 +938,9 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
         tprof[MEM_SA][tid] += __rdtsc() - tim;
         #endif
         
+        int my1 = 0, my2 = 0;
         for (i = smem_ptr; i <= pos; i++)
-        {
+        {   
             SMEM *p = &matchArray[i];
             int64_t step;
             int32_t count, slen = p->n + 1 - p->m; // seed length
@@ -944,9 +954,10 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
             tprof[MEM_SA][tid] += __rdtsc() - tim;
             #endif
             
-            cnt = 0;            
+            cnt = 0;
+            my2 = 0;            
             for (k = count = 0; k < p->s && count < opt->max_occ; k += step, ++count)
-            {
+            {   
                 mem_chain_t tmp, *lower, *upper;
                 mem_seed_t s;
                 int rid, to_add = 0;
@@ -1004,7 +1015,7 @@ void mem_chain_seeds(FMI_search *fmi, const mem_opt_t *opt,
                 }
             }
         } // seeds
-
+        
         smem_ptr = pos + 1;     
         size = kb_size(tree);
         // tprof[PE21][0] += kb_size(tree) * sizeof(mem_chain_t);
@@ -1665,6 +1676,7 @@ int mem_kernel1_core(FMI_search *fmi,
     tim = __rdtsc();    
     /********************** Kernel 1: FM+SMEMs *************************/
     printf_(VER, "6. Calling mem_collect_smem.., tid: %d\n", tid);
+    // printf_(MY, "\t\t Mem collect smem start\n");
     mem_collect_smem(fmi, opt,
                      seq_,
                      nseq,
@@ -1685,6 +1697,7 @@ int mem_kernel1_core(FMI_search *fmi,
 
     /********************* Kernel 1.1: SA2REF **********************/
     printf_(VER, "6.1. Calling mem_chain..\n");
+    // printf_(MY, "\t\t Mem chain seed start\n");
     mem_chain_seeds(fmi, opt, fmi->idx->bns,
                     seq_, nseq, tid,
                     chain_ar,
@@ -1699,10 +1712,14 @@ int mem_kernel1_core(FMI_search *fmi,
     /************** Post-processing of collected smems/chains ************/
     // tim = __rdtsc();
     printf_(VER, "6.1. Calling mem_chain_flt..\n");
+    size_t mytmp;
+    // printf_(MY, "\t\t Mem chain filter start\n");
     for (int l=0; l<nseq; l++)
     {
         chn = &chain_ar[l];
+        mytmp = chn->n;
         chn->n = mem_chain_flt(opt, chn->n, chn->a, tid);
+        // fprintf(stderr, "before: %ld, after: %ld\n", mytmp, chn->n);
     }
     printf_(VER, "7. Done mem_chain_flt..\n");
     // tprof[MEM_ALN_M1][tid] += __rdtsc() - tim;
@@ -1731,23 +1748,40 @@ int mem_kernel2_core(FMI_search *fmi,
                      int tid)
 {
     int i;
+    // printf_(MY, "\tmem kernel2 core start\n");
     for (int l=0; l<nseq; l++)
     {
         kv_init(regs[l]);
     }
     /****************** Kernel 2: B-SWA *********************/
+    // printf_(MY, "\tmem kernel2 core kv_init done\n");
     uint64_t tim = __rdtsc();
     printf_(VER, "9. Calling mem_chain2aln...\n");
-    mem_chain2aln_across_reads_V2(opt,
-                                  fmi->idx->bns,
-                                  fmi->idx->pac,
-                                  seq_,
-                                  nseq,
-                                  chain_ar,
-                                  regs,
-                                  mmc,
-                                  ref_string,
-                                  tid);
+    if (opt->my) {
+        // printf_(MY, "\tmem kernel2 core real aln start\n");
+        mem_chain2aln_across_reads_V2(opt,
+                                    fmi->idx->bns,
+                                    fmi->idx->pac,
+                                    seq_,
+                                    nseq,
+                                    chain_ar,
+                                    regs,
+                                    mmc,
+                                    ref_string,
+                                    tid);
+    }
+    else {
+        mem_chain2aln_across_reads_V2_ori(opt,
+                                    fmi->idx->bns,
+                                    fmi->idx->pac,
+                                    seq_,
+                                    nseq,
+                                    chain_ar,
+                                    regs,
+                                    mmc,
+                                    ref_string,
+                                    tid);
+    }
 
     printf_(VER, "9. Done mem_chain2aln...\n\n");
     tprof[MEM_ALN2][tid] += __rdtsc() - tim;
@@ -1760,6 +1794,7 @@ int mem_kernel2_core(FMI_search *fmi,
             mem_chain_t chn = chain->a[i];
             if (chn.m > SEEDS_PER_CHAIN)
             {
+                // printf_(MY, "\tPE11 access by tid %d - ALN\n", tid);
                 tprof[PE11][tid] ++;
                 free(chn.seeds);
             }
@@ -1790,7 +1825,7 @@ int mem_kernel2_core(FMI_search *fmi,
                                          fmi->idx->pac,
                                          (uint8_t*) seq_[l].seq,
                                          regs[l].n, regs[l].a, &regs[l].useMateSort);
-        #else
+        #else 
         regs[l].n = mem_sort_dedup_patch(opt, fmi->idx->bns,
                                     fmi->idx->pac,
                                     (uint8_t*) seq_[l].seq,
@@ -1815,7 +1850,7 @@ int mem_kernel2_core(FMI_search *fmi,
 static void worker_aln(void *data, long seq_id, long batch_size, int tid)
 {
     worker_t *w = (worker_t*) data;
-    
+    // printf_(MY, "\tWorker_aln start\n");
     printf_(VER, "11. Calling mem_kernel2_core..\n");   
     mem_kernel2_core(w->fmi, w->opt, 
                      w->seqs + seq_id,
@@ -2012,53 +2047,75 @@ void mem_process_seqs(mem_opt_t *opt,
                       int n,
                       bseq1_t *seqs,
                       const mem_pestat_t *pes0,
-                      worker_t &w)
+                      worker_t *w,
+                      int step)
 {
-    mem_pestat_t pes[4];
-    double ctime, rtime;
-    
-    ctime = cputime(); rtime = realtime();
-    w.opt = opt;
-    w.seqs = seqs; w.n_processed = n_processed;
-    w.pes = &pes[0];
-
-    //int n_ = (opt->flag & MEM_F_PE) ? n : n;   // this requires n%2==0
+    // mem_pestat_t pes[4];
+    // printf_(MY, "mem_process_seqs for bwt start\n");
     int n_ = n;
-    
-    uint64_t tim = __rdtsc();   
-    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
-    
-    kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
+    if (step == 1) {
+        // mem_pestat_t *pes = (mem_pestat_t *) malloc(4 * sizeof(mem_pestat_t));
+        // double ctime, rtime;
+        // ctime = cputime(); rtime = realtime();
+        w->opt = opt;
+        w->seqs = seqs; w->n_processed = n_processed;
+        // w->pes = &pes[0];
+        // w->pes = pes;
 
-    fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
-    
-    kt_for(worker_aln, &w, n_); // BSW
-    tprof[WORKER10][0] += __rdtsc() - tim;      
-
-
-    // PAIRED_END
-    if (opt->flag & MEM_F_PE) { // infer insert sizes if not provided
-        if (pes0)
-            memcpy_bwamem(pes, 4 * sizeof(mem_pestat_t), pes0, 4 * sizeof(mem_pestat_t), __FILE__, __LINE__); // if pes0 != NULL, set the insert-size
-                                                         // distribution as pes0
-        else {
-            fprintf(stderr, "[0000] Inferring insert size distribution of PE reads from data, "
-                    "l_pac: %ld, n: %d\n", w.fmi->idx->bns->l_pac, n);
-            mem_pestat(opt, w.fmi->idx->bns->l_pac, n, w.regs, pes); // otherwise, infer the insert size
-                                                         // distribution from data
-        }
+        //int n_ = (opt->flag & MEM_F_PE) ? n : n;   // this requires n%2==0
+        
+        // uint64_t tim = __rdtsc();   
+        fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
+        
+        kt_for(worker_bwt, w, n_); // SMEMs (+SAL)
+        return;
     }
-    
-    tim = __rdtsc();
-    fprintf(stderr, "[0000] 3. Calling kt_for - worker_sam\n");
-    
-    kt_for(worker_sam, &w,  n_);   // SAM   
-    tprof[WORKER20][0] += __rdtsc() - tim;
+    else if (step == 2) {
+        fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
+        mem_pestat_t *pes = (mem_pestat_t *) malloc(4 * sizeof(mem_pestat_t));
+        int16_t tmp_nthreads = w->nthreads;
 
-    fprintf(stderr, "\t[0000][ M::%s] Processed %d reads in %.3f "
-            "CPU sec, %.3f real sec\n",
-            __func__, n, cputime() - ctime, realtime() - rtime);
+        double aln_ctime, aln_rtime;
+        aln_ctime = cputime(); aln_rtime = realtime();
 
+        // if (opt->my) {
+        //     w->nthreads = 32;
+        //     fprintf(stderr, "gpu code activated\n");
+        // }
+        kt_for(worker_aln, w, n_); // BSW
+
+        fprintf(stderr, "worker aln takes %.3f CPU sec, %.3f real sec\n", cputime()-aln_ctime, realtime()-aln_rtime);
+        w->nthreads = tmp_nthreads;
+        // tprof[WORKER10][0] += __rdtsc() - tim;      
+
+
+        // PAIRED_END
+        if (opt->flag & MEM_F_PE) { // infer insert sizes if not provided
+            if (pes0)
+                memcpy_bwamem(pes, 4 * sizeof(mem_pestat_t), pes0, 4 * sizeof(mem_pestat_t), __FILE__, __LINE__); // if pes0 != NULL, set the insert-size
+                                                            // distribution as pes0
+            else {
+                fprintf(stderr, "[0000] Inferring insert size distribution of PE reads from data, "
+                        "l_pac: %ld, n: %d\n", w->fmi->idx->bns->l_pac, n);
+                mem_pestat(opt, w->fmi->idx->bns->l_pac, n, w->regs, pes); // otherwise, infer the insert size
+                                                            // distribution from data
+            }
+        }
+        
+        uint64_t tim = __rdtsc();
+        fprintf(stderr, "[0000] 3. Calling kt_for - worker_sam\n");
+        
+        kt_for(worker_sam, w,  n_);   // SAM   
+        tprof[WORKER20][0] += __rdtsc() - tim;
+        // printf_(MY, "mem_process_seqs end\n");
+        free(pes);
+        fprintf(stderr, "\t[0000][ M::%s] Processed %d reads\n",
+                __func__, n);
+        // fprintf(stderr, "\t[0000][ M::%s] Processed %d reads in %.3f "
+        //         "CPU sec, %.3f real sec\n",
+        //         __func__, n, cputime() - ctime, realtime() - rtime);
+        return;
+    }
 }
 
 static void mem_mark_primary_se_core(const mem_opt_t *opt, int n, mem_alnreg_t *a, int_v *z)
@@ -2660,7 +2717,7 @@ inline void sortPairsLen(SeqPair *pairArray, int32_t count, SeqPair *tempArray, 
 /* Restructured BSW parent function */
 #define FAC 8
 #define PFD 2
-void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
+void mem_chain2aln_across_reads_V2_ori(const mem_opt_t *opt, const bntseq_t *bns,
                                    const uint8_t *pac, bseq1_t *seq_, int nseq,
                                    mem_chain_v* chain_ar, mem_alnreg_v *av_v,
                                    mem_cache *mmc, uint8_t *ref_string, int tid)
@@ -2758,6 +2815,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 if (c->seeds[0].rbeg < l_pac) rmax[1] = l_pac;
                 else rmax[0] = l_pac;
             }
+            
 
             /* retrieve the reference sequence */
             {
@@ -2890,7 +2948,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                     sp.len2 = s->qbeg;
                     sp.len1 = tmp;
                     int minval = sp.h0 + min_(sp.len1, sp.len2) * opt->a;
-                    
+                    // fprintf(stderr, "rmax[0]: %d, rmax[1]: %d, ref len: %d, rbeg: %d\n", rmax[0], rmax[1], sp.len1, s->rbeg);
                     if (sp.len1 < MAX_SEQ_LEN8 && sp.len2 < MAX_SEQ_LEN8 && minval < MAX_SEQ_LEN8) {
                         numPairsLeft128++;
                     }
@@ -2942,7 +3000,8 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                     
                     sp.len2 = l_query - qe;
                     sp.len1 = rmax[1] - rmax[0] - re;
-
+                    // fprintf(stderr, "rmax[0]: %d, rmax[1]: %d, ref len: %d\n", rmax[0], rmax[1], sp.len1);
+                    // fprintf(stderr, "right ref len: %d, left ref len: %d, seedlen: %d\n", sp.len1, tmp, s->len);
                     sp.idq = rightQerOffset;
                     sp.idr = rightRefOffset;
                     
@@ -3053,7 +3112,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
     SeqPair *pair_ar = seqPairArrayLeft128 + numPairsLeft128 + numPairsLeft16;
     SeqPair *pair_ar_aux = seqPairArrayAux;
     int nump = numPairsLeft1;
-    
+    // if (nump > 0) fprintf(stderr, "numPairs: %d\n", nump);
     // scalar
     for ( i=0; i<MAX_BAND_TRY; i++)
     {
@@ -3521,6 +3580,1469 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
                     int64_t rd;
                     int qd, w, max_gap;
+                    if (s->rbeg < p->rb || s->rbeg + s->len > p->re || s->qbeg < p->qb
+                        || s->qbeg + s->len > p->qe) {
+                        v++; continue; // not fully contained
+                    }
+                
+                    if (s->len - p->seedlen0 > .1 * l_query) { v++; continue;}
+                    // qd: distance ahead of the seed on query; rd: on reference
+                    qd = s->qbeg - p->qb; rd = s->rbeg - p->rb;
+                    // the maximal gap allowed in regions ahead of the seed
+                    max_gap = cal_max_gap(opt, qd < rd? qd : rd); 
+                    w = max_gap < p->w? max_gap : p->w; // bounded by the band width
+                    if (qd - rd < w && rd - qd < w) break; // the seed is "around" a previous hit
+                    // similar to the previous four lines, but this time we look at the region behind
+                    qd = p->qe - (s->qbeg + s->len); rd = p->re - (s->rbeg + s->len);
+                    max_gap = cal_max_gap(opt, qd < rd? qd : rd);
+                    w = max_gap < p->w? max_gap : p->w;
+                    if (qd - rd < w && rd - qd < w) break;
+                    
+                    v++;
+                }
+                
+                // the seed is (almost) contained in an existing alignment;
+                // further testing is needed to confirm it is not leading
+                // to a different aln
+                if (v < lim[l])
+                {
+                    for (v = k + 1; v < c->n; ++v)
+                    {
+                        const mem_seed_t *t;
+                        if (srt2[v] == UINT_MAX) continue;
+                        t = &c->seeds[srt2[v]];
+                        //if (t->done == H0_) continue;  //check for interferences!!!
+                        // only check overlapping if t is long enough;
+                        // TODO: more efficient by early stopping
+                        if (t->len < s->len * .95) continue; 
+                        if (s->qbeg <= t->qbeg && s->qbeg + s->len - t->qbeg >= s->len>>2 &&
+                            t->qbeg - s->qbeg != t->rbeg - s->rbeg) break;
+                        if (t->qbeg <= s->qbeg && t->qbeg + t->len - s->qbeg >= s->len>>2 &&
+                            s->qbeg - t->qbeg != s->rbeg - t->rbeg) break;
+                    }
+                    if (v == c->n) {                  // no overlapping seeds; then skip extension
+                        mem_alnreg_t *ar = &(av_v[l].a[s->aln]);
+                        ar->qb = ar->qe = -1;         // purge the alingment
+                        srt2[k] = UINT_MAX;
+                        tprof[PE18][tid]++;
+                        continue;
+                    }
+                }                
+                lim[l]++;
+            }
+        }
+    }
+    free(srtgg);
+    free(srt);
+    free(lim);
+    // tprof[MEM_ALN2_DOWN][tid] += __rdtsc() - tim;    
+}
+
+void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
+                                   const uint8_t *pac, bseq1_t *seq_, int nseq,
+                                   mem_chain_v* chain_ar, mem_alnreg_v *av_v,
+                                   mem_cache *mmc, uint8_t *ref_string, int tid)
+{
+    SeqPair *seqPairArrayAux      = mmc->seqPairArrayAux[tid];
+    SeqPair *seqPairArrayLeft128  = mmc->seqPairArrayLeft128[tid];
+    SeqPair *seqPairArrayRight128 = mmc->seqPairArrayRight128[tid];
+    int64_t *wsize_pair = &(mmc->wsize[tid]);
+
+    uint8_t *seqBufLeftRef  = mmc->seqBufLeftRef[tid*CACHE_LINE]; 
+    uint8_t *seqBufRightRef = mmc->seqBufRightRef[tid*CACHE_LINE];
+    uint8_t *seqBufLeftQer  = mmc->seqBufLeftQer[tid*CACHE_LINE]; 
+    uint8_t *seqBufRightQer = mmc->seqBufRightQer[tid*CACHE_LINE];
+    int64_t *wsize_buf_ref = &(mmc->wsize_buf_ref[tid*CACHE_LINE]);
+    int64_t *wsize_buf_qer = &(mmc->wsize_buf_qer[tid*CACHE_LINE]);
+    
+    // int32_t *lim_g = mmc->lim + (BATCH_SIZE + 32) * tid;
+    // fprintf(stderr, "seq: %d\n", nseq);
+    int32_t *lim_g = mmc->lim[tid];
+    
+    mem_seed_t *s;
+    int64_t l_pac = bns->l_pac, rmax[8] __attribute__((aligned(64)));
+    // std::vector<int8_t> nexitv(nseq, 0);
+    
+    int numPairsLeft = 0, numPairsRight = 0;
+    int numPairsLeft1 = 0, numPairsRight1 = 0;
+    int numPairsLeft128 = 0, numPairsRight128 = 0;
+    int numPairsLeft16 = 0, numPairsRight16 = 0;
+
+    int64_t leftRefOffset = 0, rightRefOffset = 0;
+    int64_t leftQerOffset = 0, rightQerOffset = 0;
+
+    int srt_size = MAX_SEEDS_PER_READ, fac = FAC;
+    uint64_t *srt = (uint64_t *) malloc(srt_size * 8);
+    uint32_t *srtgg = (uint32_t*) malloc(nseq * SEEDS_PER_READ * fac * sizeof(uint32_t));
+
+    int spos = 0;
+    
+    // uint64_t timUP = __rdtsc();
+    int maxQerLeft = 0, maxRefLeft = 0;
+    int maxQerRight = 0, maxRefRight = 0;
+    for (int l=0; l<nseq; l++)
+    {
+        int max = 0;
+        uint8_t *rseq = 0;
+        
+        uint32_t *srtg = srtgg;
+        lim_g[l+1] = 0;
+        
+        const uint8_t *query = (uint8_t *) seq_[l].seq;
+        int l_query = seq_[l].l_seq;
+    
+        mem_chain_v *chn = &chain_ar[l];        
+        mem_alnreg_v *av = &av_v[l];  // alignment
+        mem_chain_t *c;
+
+        _mm_prefetch((const char*) query, _MM_HINT_NTA);
+        
+        // aln mem allocation
+        av->m = 0;
+        for (int j=0; j<chn->n; j++) {
+            c = &chn->a[j]; av->m += c->n;
+        }
+        av->a = (mem_alnreg_t*)calloc(av->m, sizeof(mem_alnreg_t));
+
+        // aln mem allocation ends
+        for (int j=0; j<chn->n; j++)
+        {
+            c = &chn->a[j];
+            assert(c->seqid == l);
+            
+            int64_t tmp = 0;
+            if (c->n == 0) continue;
+            
+            _mm_prefetch((const char*) (srtg + spos + 64), _MM_HINT_NTA);
+            _mm_prefetch((const char*) (lim_g), _MM_HINT_NTA);
+            
+            // get the max possible span
+            rmax[0] = l_pac<<1; rmax[1] = 0;
+
+            for (int i = 0; i < c->n; ++i) {
+                int64_t b, e;
+                const mem_seed_t *t = &c->seeds[i];
+                b = t->rbeg - (t->qbeg + cal_max_gap(opt, t->qbeg));
+                e = t->rbeg + t->len + ((l_query - t->qbeg - t->len) +
+                                        cal_max_gap(opt, l_query - t->qbeg - t->len));
+
+                tmp = rmax[0];
+                rmax[0] = tmp < b? rmax[0] : b;
+                rmax[1] = (rmax[1] > e)? rmax[1] : e;
+                if (t->len > max) max = t->len;
+            }
+            
+            rmax[0] = rmax[0] > 0? rmax[0] : 0;
+            rmax[1] = rmax[1] < l_pac<<1? rmax[1] : l_pac<<1;
+            if (rmax[0] < l_pac && l_pac < rmax[1])
+            {
+                if (c->seeds[0].rbeg < l_pac) rmax[1] = l_pac;
+                else rmax[0] = l_pac;
+            }
+            
+
+            /* retrieve the reference sequence */
+            {
+                int rid = 0;
+                // free rseq
+                rseq = bns_fetch_seq_v2(bns, pac, &rmax[0],
+                                        c->seeds[0].rbeg,
+                                        &rmax[1], &rid, ref_string,
+                                        (uint8_t*) seqPairArrayAux);
+                assert(c->rid == rid);
+            }
+
+            _mm_prefetch((const char*) rseq, _MM_HINT_NTA);
+            // _mm_prefetch((const char*) rseq + 64, _MM_HINT_NTA);
+            
+            // assert(c->n < MAX_SEEDS_PER_READ);  // temp
+            if (c->n > srt_size) {
+                srt_size = c->n + 10;
+                srt = (uint64_t *) realloc(srt, srt_size * 8);
+            }
+            
+            for (int i = 0; i < c->n; ++i) 
+                srt[i] = (uint64_t)c->seeds[i].score<<32 | i;
+
+            if (c->n > 1) 
+                ks_introsort_64(c->n, srt);
+            
+            // assert((spos + c->n) < SEEDS_PER_READ * FAC * nseq);
+            if ((spos + c->n) > SEEDS_PER_READ * fac * nseq) {
+                fac <<= 1;
+                srtgg = (uint32_t *) realloc(srtgg, nseq * SEEDS_PER_READ * fac * sizeof(uint32_t));
+            }
+            
+            for (int i = 0; i < c->n; ++i)
+                srtg[spos++] = srt[i];
+
+            lim_g[l+1] += c->n;
+            
+            // uint64_t tim = __rdtsc();
+            for (int k=c->n-1; k >= 0; k--)
+            {
+                s = &c->seeds[(uint32_t)srt[k]];
+
+                mem_alnreg_t *a;
+                // a = kv_pushp(mem_alnreg_t, *av);
+                a = &av->a[av->n++];
+                memset_s(a, sizeof(mem_alnreg_t), 0);
+                
+                s->aln = av->n-1;
+                
+                a->w = opt->w;
+                a->score = a->truesc = -1;
+                a->rid = c->rid;
+                a->frac_rep = c->frac_rep;
+                a->seedlen0 = s->len;
+                a->c = c; //ptr
+                a->rb = a->qb = a->re = a->qe = H0_;
+                
+                tprof[PE19][tid] ++;
+                
+                int flag = 0;
+                std::pair<int, int> pr;
+                if (s->qbeg)  // left extension
+                {
+                    SeqPair sp;
+                    sp.h0 = s->len * opt->a;
+                    sp.seqid = c->seqid;
+                    sp.regid = av->n - 1;
+                        
+                    if (numPairsLeft >= *wsize_pair) {
+                        fprintf(stderr, "[0000][%0.4d] Re-allocating seqPairArrays, in Left\n", tid);
+                        *wsize_pair += 1024;
+                        seqPairArrayAux = (SeqPair *) realloc(seqPairArrayAux,
+                                                              (*wsize_pair + MAX_LINE_LEN)
+                                                              * sizeof(SeqPair));
+                        mmc->seqPairArrayAux[tid] = seqPairArrayAux;
+                        seqPairArrayLeft128 = (SeqPair *) realloc(seqPairArrayLeft128,
+                                                                  (*wsize_pair + MAX_LINE_LEN)
+                                                                  * sizeof(SeqPair));
+                        mmc->seqPairArrayLeft128[tid] = seqPairArrayLeft128;
+                        seqPairArrayRight128 = (SeqPair *) realloc(seqPairArrayRight128,
+                                                                   (*wsize_pair + MAX_LINE_LEN)
+                                                                   * sizeof(SeqPair));
+                        mmc->seqPairArrayRight128[tid] = seqPairArrayRight128;
+                    }
+
+                    
+                    sp.idq = leftQerOffset;
+                    sp.idr = leftRefOffset;
+                    
+                    leftQerOffset += s->qbeg;
+                    if (leftQerOffset >= *wsize_buf_qer)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufQers in %s (left)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_qer;
+                        *wsize_buf_qer *= 2;
+                        uint8_t *seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufLeftQer[tid*CACHE_LINE] = seqBufLeftQer = seqBufQer_;
+                        
+                        seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufRightQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufRightQer[tid*CACHE_LINE] = seqBufRightQer = seqBufQer_;      
+                    }
+                    
+                    uint8_t *qs = seqBufLeftQer + sp.idq;
+                    for (int i = 0; i < s->qbeg; ++i) qs[i] = query[s->qbeg - 1 - i];
+                    
+                    tmp = s->rbeg - rmax[0];
+                    leftRefOffset += tmp;
+                    if (leftRefOffset >= *wsize_buf_ref)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufRefs in %s (left)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_ref;
+                        *wsize_buf_ref *= 2;
+                        uint8_t *seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufLeftRef[tid*CACHE_LINE] = seqBufLeftRef = seqBufRef_;
+                        
+                        seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufRightRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufRightRef[tid*CACHE_LINE] = seqBufRightRef = seqBufRef_;              
+                    }
+                    
+                    uint8_t *rs = seqBufLeftRef + sp.idr;                    
+                    for (int64_t i = 0; i < tmp; ++i) rs[i] = rseq[tmp - 1 - i]; //seq1
+                    
+                    sp.len2 = s->qbeg;
+                    maxQerLeft = maxQerLeft < sp.len2 ? sp.len2 : maxQerLeft;
+                    sp.len1 = tmp;
+                    maxRefLeft = maxRefLeft < sp.len1 ? sp.len1 : maxRefLeft;
+                    int minval = sp.h0 + min_(sp.len1, sp.len2) * opt->a;
+                    // fprintf(stderr, "rmax[0]: %d, rmax[1]: %d, ref len: %d, rbeg: %d\n", rmax[0], rmax[1], sp.len1, s->rbeg);
+                    if (sp.len1 < MAX_SEQ_LEN8 && sp.len2 < MAX_SEQ_LEN8 && minval < MAX_SEQ_LEN8) {
+                        numPairsLeft128++;
+                    }
+                    else if (sp.len1 < MAX_SEQ_LEN16 && sp.len2 < MAX_SEQ_LEN16 && minval < MAX_SEQ_LEN16){
+                        numPairsLeft16++;
+                    }
+                    else {                          
+                        numPairsLeft1++;
+                    }
+                    
+                    seqPairArrayLeft128[numPairsLeft] = sp;
+                    numPairsLeft ++;
+                    a->qb = s->qbeg; a->rb = s->rbeg;
+                }
+                else
+                {
+                    flag = 1;
+                    a->score = a->truesc = s->len * opt->a, a->qb = 0, a->rb = s->rbeg;
+                }
+
+                if (s->qbeg + s->len != l_query)  // right extension
+                {
+                    int64_t qe = s->qbeg + s->len;
+                    int64_t re = s->rbeg + s->len - rmax[0];
+                    assert(re >= 0);                    
+                    SeqPair sp;
+
+                    sp.h0 = H0_; //random number
+                    sp.seqid = c->seqid;
+                    sp.regid = av->n - 1;
+
+                    if (numPairsRight >= *wsize_pair)
+                    {
+                        fprintf(stderr, "[0000] [%0.4d] Re-allocating seqPairArrays Right\n", tid);
+                        *wsize_pair += 1024;
+                        seqPairArrayAux = (SeqPair *) realloc(seqPairArrayAux,
+                                                              (*wsize_pair + MAX_LINE_LEN)
+                                                              * sizeof(SeqPair));
+                        mmc->seqPairArrayAux[tid] = seqPairArrayAux;
+                        seqPairArrayLeft128 = (SeqPair *) realloc(seqPairArrayLeft128,
+                                                                  (*wsize_pair + MAX_LINE_LEN)
+                                                                  * sizeof(SeqPair));
+                        mmc->seqPairArrayLeft128[tid] = seqPairArrayLeft128;
+                        seqPairArrayRight128 = (SeqPair *) realloc(seqPairArrayRight128,
+                                                                   (*wsize_pair + MAX_LINE_LEN)
+                                                                   * sizeof(SeqPair));
+                        mmc->seqPairArrayRight128[tid] = seqPairArrayRight128;
+                    }
+                    
+                    sp.len2 = l_query - qe;
+                    sp.len1 = rmax[1] - rmax[0] - re;
+                    maxQerRight = maxQerRight < sp.len2 ? sp.len2 : maxQerRight;
+                    maxRefRight = maxRefRight < sp.len1 ? sp.len1 : maxRefRight;
+                    // fprintf(stderr, "rmax[0]: %d, rmax[1]: %d, ref len: %d\n", rmax[0], rmax[1], sp.len1);
+                    // fprintf(stderr, "right ref len: %d, left ref len: %d, seedlen: %d\n", sp.len1, tmp, s->len);
+                    sp.idq = rightQerOffset;
+                    sp.idr = rightRefOffset;
+                    
+                    rightQerOffset += sp.len2;
+                    if (rightQerOffset >= *wsize_buf_qer)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufQers in %s (right)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_qer;
+                        *wsize_buf_qer *= 2;
+                        uint8_t *seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufLeftQer[tid*CACHE_LINE] = seqBufLeftQer = seqBufQer_;
+                        
+                        seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufRightQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufRightQer[tid*CACHE_LINE] = seqBufRightQer = seqBufQer_;      
+                    }
+
+                    rightRefOffset += sp.len1;
+                    if (rightRefOffset >= *wsize_buf_ref)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufRefs in %s (right)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_ref;
+                        *wsize_buf_ref *= 2;
+                        uint8_t *seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufLeftRef[tid*CACHE_LINE] = seqBufLeftRef = seqBufRef_;
+                        
+                        seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufRightRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufRightRef[tid*CACHE_LINE] = seqBufRightRef = seqBufRef_;              
+                    }
+                    
+                    tprof[PE23][tid] += sp.len1 + sp.len2;
+
+                    uint8_t *qs = seqBufRightQer + sp.idq;
+                    uint8_t *rs = seqBufRightRef + sp.idr;
+
+                    for (int i = 0; i < sp.len2; ++i) qs[i] = query[qe + i];
+
+                    for (int i = 0; i < sp.len1; ++i) rs[i] = rseq[re + i]; //seq1
+
+                    int minval = sp.h0 + min_(sp.len1, sp.len2) * opt->a;
+                    
+                    if (sp.len1 < MAX_SEQ_LEN8 && sp.len2 < MAX_SEQ_LEN8 && minval < MAX_SEQ_LEN8) {
+                        numPairsRight128++;
+                    }
+                    else if(sp.len1 < MAX_SEQ_LEN16 && sp.len2 < MAX_SEQ_LEN16 && minval < MAX_SEQ_LEN16) {
+                        numPairsRight16++;
+                    }
+                    else {
+                        numPairsRight1++;
+                    }
+                    seqPairArrayRight128[numPairsRight] = sp;
+                    numPairsRight ++;
+                    a->qe = qe; a->re = rmax[0] + re;
+                }
+                else
+                {
+                    a->qe = l_query, a->re = s->rbeg + s->len;
+                    // seedcov business, this "if" block should be redundant, check and remove.
+                    if (a->rb != H0_ && a->qb != H0_)
+                    {
+                        int i;
+                        for (i = 0, a->seedcov = 0; i < c->n; ++i)
+                        {
+                            const mem_seed_t *t = &c->seeds[i];
+                            if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                                t->rbeg >= a->rb && t->rbeg + t->len <= a->re) // seed fully contained
+                                a->seedcov += t->len;
+                        }
+                    }
+                }
+            }
+            // tprof[MEM_ALN2_DOWN1][tid] += __rdtsc() - tim;
+        }
+    }
+    // tprof[MEM_ALN2_UP][tid] += __rdtsc() - timUP;
+    
+
+    // int32_t *hist = (int32_t *)_mm_malloc((MAX_SEQ_LEN8 + MAX_SEQ_LEN16 + 32) *
+    //                                       sizeof(int32_t), 64);
+    
+    // /* Sorting based score is required as that affects the use of SIMD lanes */
+    // sortPairsLenExt(seqPairArrayLeft128, numPairsLeft, seqPairArrayAux, hist,
+    //                 numPairsLeft128, numPairsLeft16, numPairsLeft1, opt->a);
+    // assert(numPairsLeft == (numPairsLeft128 + numPairsLeft16 + numPairsLeft1));
+    
+
+    // SWA
+    // uint64_t timL = __rdtsc();
+    int nthreads = 1;
+
+    // Now, process all the collected seq-pairs
+    // First, left alignment, move out these calls
+    BandedPairWiseSW bswLeft(opt->o_del, opt->e_del, opt->o_ins,
+                             opt->e_ins, opt->zdrop, opt->pen_clip5,
+                             opt->mat, opt->a, opt->b, nthreads);
+    
+    BandedPairWiseSW bswRight(opt->o_del, opt->e_del, opt->o_ins,
+                              opt->e_ins, opt->zdrop, opt->pen_clip3,
+                              opt->mat, opt->a, opt->b, nthreads);
+    
+    int i;
+    // Left
+    SeqPair *pair_ar = seqPairArrayLeft128;
+    SeqPair *pair_ar_aux = seqPairArrayAux;
+    int nump = numPairsLeft;
+
+    // Get shared memory size
+    // unsigned minSize = maxQerLeft < maxRefLeft? maxRefLeft : maxQerLeft;
+    unsigned minSize = maxQerLeft < maxRefLeft ? maxQerLeft : maxRefLeft;
+
+    // unsigned totShmem = 3 * (minSize + 1) * sizeof(int32_t);
+    // unsigned alignmentPad = 4 + (4 - totShmem % 4);
+    // size_t ShmemBytes = totShmem + alignmentPad;
+    // SeqPair *pair = pair_ar + 2;
+
+    // fprintf(stderr, "before score: %d\n", pair->score);
+    /*------------------------------------------------*/
+    SeqPair *pair_ar_check = (SeqPair *) malloc(sizeof(SeqPair) * nump);
+    memcpy(pair_ar_check, pair_ar, sizeof(SeqPair) * nump);
+    /*------------------------------------------------*/
+    // fprintf(stderr, "o_del: %d, o_in: %d, e_del: %d, e_in: %d\n", opt->o_del, opt->o_ins, opt->e_del, opt->e_ins);
+    // fprintf(stderr, "after score: %d\n", pair->score);
+    SeqPair *tmpPair1, *tmpPair2;
+    /*-------------------------------*/
+    // int target_pair = 0;
+    // SeqPair *tmp_pair = pair_ar + target_pair;
+    // fprintf(stderr, "pair %d, init: %d, score: %d, tle: %d, qle: %d, refLen: %d, qerLen: %d\n", i, tmp_pair->h0, tmp_pair->score, tmp_pair->tle, tmp_pair->qle, tmp_pair->len1, tmp_pair->len2);
+    // fprintf(stderr, "ori ref: ");
+    // for (int uu = 0; uu < tmp_pair->len1; uu++) {
+    //     fprintf(stderr, "%u ", *(seqBufLeftRef + tmp_pair->idr + uu));
+    // }
+    // fprintf(stderr, "\n");
+    // fprintf(stderr, "ori qer: ");
+    // for (int uu = 0; uu < tmp_pair->len2; uu++) {
+    //     fprintf(stderr, "%u ", *(seqBufLeftQer + tmp_pair->idq + uu));
+    // }
+    // fprintf(stderr, "\n");
+    /*-------------------------------*/
+    // fprintf(stderr, "\n/--------------------left-----------------/\n");
+    for ( i=0; i<1; i++)
+    // for ( i=0; i<MAX_BAND_TRY; i++)
+    {
+        int *input, *output;
+        input = (int *) calloc(5, sizeof(int));
+        output = (int *) calloc(5, sizeof(int));
+        kernel::gpu_kernel_wrapper(pair_ar, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, nump, minSize, maxRefLeft, maxQerLeft, opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        int32_t w = opt->w << i;
+
+        // int64_t tim = __rdtsc();
+        
+// #if ((!__AVX512BW__) && (!__AVX2__) && (!__SSE2__))
+//         bswLeft.scalarBandedSWAWrapper(pair_ar_check, seqBufLeftRef, seqBufLeftQer, nump, nthreads, w);
+// #else
+//         // sortPairsLen(pair_ar, nump, seqPairArrayAux, hist);
+//         bswLeft.scalarBandedSWAWrapper(pair_ar_check,
+//                            seqBufLeftRef,
+//                            seqBufLeftQer,
+//                            nump,
+//                            nthreads,
+//                            w);
+// #endif  
+
+
+//         int aa = 0, bb = 0;
+//         for (int u = 0; u < nump; u++) {
+//             tmpPair1 = &pair_ar[u];
+//             tmpPair2 = &pair_ar_check[u];
+//             if (tmpPair1->qle != tmpPair2->qle || tmpPair1->tle != tmpPair2->tle || tmpPair1->score != tmpPair2->score ||
+//                 tmpPair1->gscore != tmpPair2->gscore || tmpPair1->gtle != tmpPair2->gtle) {
+//                 // if (tmpPair1->score == tmpPair2->score) continue;
+//                 // if (tmpPair1->qle == tmpPair2->qle - 5) continue;
+//                 // if (tmpPair1->gscore == tmpPair2->gscore && tmpPair1->gscore == 0) continue; 
+//                 // fprintf(stderr, "pair %d, init: %d, match: %d, mismatch: %d, e_ins: %d, o_ins: %d, band: %d\n", u, tmpPair1->h0, opt->a, opt->b, opt->e_ins, opt->o_ins, w);
+//                 // fprintf(stderr, "score: ori: %d, my: %d\n", tmpPair1->score, tmpPair2->score);
+//                 // fprintf(stderr, "gscore: ori: %d, my: %d\n", tmpPair1->gscore, tmpPair2->gscore);
+//                 // fprintf(stderr, "qle: ori: %d, my: %d\n", tmpPair1->qle, tmpPair2->qle);
+//                 // fprintf(stderr, "tle: ori: %d, my: %d\n", tmpPair1->tle, tmpPair2->tle);
+//                 // fprintf(stderr, "gtle: ori: %d, my: %d\n", tmpPair1->gtle, tmpPair2->gtle);
+//                 // fprintf(stderr, "ori: idr: %d, idq: %d, rlen: %d, qlen: %d\n", tmpPair1->idr, tmpPair1->idq, tmpPair1->len1, tmpPair1->len2);
+//                 // fprintf(stderr, "my: idr: %d, idq: %d, rlen: %d, qlen: %d\n", tmpPair2->idr, tmpPair2->idq, tmpPair2->len1, tmpPair2->len2);
+//                 // fprintf(stderr, "ori ref: ");
+//                 // for (int uu = 0; uu < tmpPair1->len1; uu++) {
+//                 //     fprintf(stderr, "%u", *(seqBufLeftRef + tmpPair1->idr + uu));
+//                 // }
+//                 // fprintf(stderr, "\n");
+//                 // fprintf(stderr, "ori qer: ");
+//                 // for (int uu = 0; uu < tmpPair1->len2; uu++) {
+//                 //     fprintf(stderr, "%u", *(seqBufLeftQer + tmpPair1->idq + uu));
+//                 // }
+//                 // fprintf(stderr, "\n");
+//                 // fprintf(stderr, "/-------------------------/\n");
+//                 aa++;
+//                 // if (aa > 3) {
+//                 //     fprintf(stderr, "[Left] %d difference with %d pair\n", aa, aa+bb);
+//                 //     // exit(0);
+//                 // }
+                
+//             }
+//             else bb++;
+//         }
+//         /*-----------------------------*/
+//         fprintf(stderr, "[Left] %d difference with %d pair\n", aa, nump);
+        // exit(0);
+        /*-----------------------------*/
+        tprof[PE1][0] += nump;
+        tprof[PE2][0] ++;
+        // tprof[MEM_ALN2_D][tid] += __rdtsc() - tim;
+
+        int num = 0;
+        int cc = 0, dd = 0, ee = 0;
+        for (int l=0; l<nump; l++)
+        {           
+            mem_alnreg_t *a;
+            SeqPair *sp = &pair_ar[l];
+            a = &(av_v[sp->seqid].a[sp->regid]); // prev
+
+            int prev = a->score;
+            a->score = sp->score;
+            
+            if (1)
+            {
+                if (sp->gscore <= 0 || sp->gscore <= a->score - opt->pen_clip5) {
+                    a->qb -= sp->qle; a->rb -= sp->tle;
+                    a->truesc = a->score;
+                    cc++;
+                } else {
+                    a->qb = 0; a->rb -= sp->gtle;
+                    // fprintf(stderr, "bb\n");
+                    a->truesc = sp->gscore;
+                    dd++;
+                }
+
+                a->w = max_(a->w, w);
+                if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
+                {
+                    int i = 0;
+                    ee++;
+                    for (i = 0, a->seedcov = 0; i < a->c->n; ++i){
+                        const mem_seed_t *t = &(a->c->seeds[i]);
+                        if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                            t->rbeg >= a->rb && t->rbeg + t->len <= a->re) {
+                                a->seedcov += t->len;
+                                // fprintf(stderr, "cc\n");
+                            }
+
+                    }
+                }
+            } else {
+                pair_ar_aux[num++] = *sp;
+                // fprintf(stderr, "aa\n");
+            }
+        }
+        // fprintf(stderr, "cc: %d, dd: %d, ee: %d\n");
+        nump = num;
+        SeqPair *tmp = pair_ar;
+        pair_ar = pair_ar_aux;
+        pair_ar_aux = tmp;
+    }
+
+    // tprof[CLEFT][tid] += __rdtsc() - timL;
+    
+    // uint64_t timR = __rdtsc();
+    // **********************************************************
+    // Right, scalar
+    for (int l=0; l<numPairsRight; l++) {
+        mem_alnreg_t *a;        
+        SeqPair *sp = &seqPairArrayRight128[l];
+        a = &(av_v[sp->seqid].a[sp->regid]); // prev
+        sp->h0 = a->score;
+    }
+
+    // ************************* Right, vector int8 **********************
+    // fprintf(stderr, "\n/--------------------right-----------------/\n");
+    pair_ar = seqPairArrayRight128;
+    pair_ar_aux = seqPairArrayAux;
+    nump = numPairsRight;
+    // minSize = maxQerRight < maxRefRight? maxRefRight : maxQerRight;
+    minSize = maxQerRight < maxRefRight ? maxQerRight : maxRefRight;
+
+    /*--------------------------------------------------*/
+    free(pair_ar_check);
+    pair_ar_check = (SeqPair *) malloc(sizeof(SeqPair) * nump);
+    memcpy(pair_ar_check, pair_ar, sizeof(SeqPair) * nump);
+    /*--------------------------------------------------*/
+
+
+
+    for ( i=0; i<1; i++)
+    // for ( i=0; i<MAX_BAND_TRY; i++)
+    {   
+        kernel::gpu_kernel_wrapper(pair_ar, seqBufRightQer, seqBufRightRef, rightRefOffset, rightQerOffset, nump, minSize, maxRefRight, maxQerRight, opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        int32_t w = opt->w << i;
+        uint64_t tim = __rdtsc();
+        
+// #if ((!__AVX512BW__) && (!__AVX2__) && (!__SSE2__))
+//         bswRight.scalarBandedSWAWrapper(pair_ar, seqBufRightRef, seqBufRightQer, nump, nthreads, w); 
+// #else
+//         // sortPairsLen(pair_ar, nump, seqPairArrayAux, hist);
+//         bswRight.scalarBandedSWAWrapper(pair_ar_check,
+//                             seqBufRightRef,
+//                             seqBufRightQer,
+//                             nump,
+//                             nthreads,
+//                             w);
+// #endif  
+            
+//         int aa = 0, bb = 0;
+//         for (int u = 0; u < nump; u++) {
+//             tmpPair1 = &pair_ar[u];
+//             tmpPair2 = &pair_ar_check[u];
+//             if (tmpPair1->qle != tmpPair2->qle || tmpPair1->tle != tmpPair2->tle || tmpPair1->score != tmpPair2->score ||
+//                 tmpPair1->gscore != tmpPair2->gscore || tmpPair1->gtle != tmpPair2->gtle) {
+//                 // if (tmpPair1->score == tmpPair2->score) continue;
+//                 // if (tmpPair1->qle == tmpPair2->qle - 5) continue;
+//                 // if (tmpPair1->gscore == tmpPair2->gscore && tmpPair1->gscore == 0) continue;
+//                 fprintf(stderr, "pair %d, init: %d, match: %d, mismatch: %d, e_ins: %d, o_ins: %d, band: %d\n", u, tmpPair1->h0, opt->a, opt->b, opt->e_ins, opt->o_ins, w);
+//                 fprintf(stderr, "score: ori: %d, my: %d\n", tmpPair1->score, tmpPair2->score);
+//                 fprintf(stderr, "gscore: ori: %d, my: %d\n", tmpPair1->gscore, tmpPair2->gscore);
+//                 fprintf(stderr, "qle: ori: %d, my: %d\n", tmpPair1->qle, tmpPair2->qle);
+//                 fprintf(stderr, "tle: ori: %d, my: %d\n", tmpPair1->tle, tmpPair2->tle);
+//                 fprintf(stderr, "gtle: ori: %d, my: %d\n", tmpPair1->gtle, tmpPair2->gtle);
+//                 fprintf(stderr, "ori: idr: %d, idq: %d, rlen: %d, qlen: %d\n", tmpPair1->idr, tmpPair1->idq, tmpPair1->len1, tmpPair1->len2);
+//                 fprintf(stderr, "my: idr: %d, idq: %d, rlen: %d, qlen: %d\n", tmpPair2->idr, tmpPair2->idq, tmpPair2->len1, tmpPair2->len2);
+//                 fprintf(stderr, "ori ref: ");
+//                 for (int uu = 0; uu < tmpPair1->len1; uu++) {
+//                     fprintf(stderr, "%u", *(seqBufRightRef + tmpPair1->idr + uu));
+//                 }
+//                 fprintf(stderr, "\n");
+//                 fprintf(stderr, "ori qer: ");
+//                 for (int uu = 0; uu < tmpPair1->len2; uu++) {
+//                     fprintf(stderr, "%u", *(seqBufRightQer + tmpPair1->idq + uu));
+//                 }
+//                 fprintf(stderr, "\n");
+//                 fprintf(stderr, "/-------------------------/\n");
+//                 aa++;
+//                 if (aa > 3) {
+//                     fprintf(stderr, "[Right] %d difference with %d pair\n", aa, aa+bb);
+//                     exit(0);
+//                 }
+                
+//             }
+//             else bb++;
+//         }
+        /*-----------------------------*/
+        // fprintf(stderr, "[Right] %d difference with %d pair\n", aa, nump);
+        free(pair_ar_check);
+        tprof[PE3][0] += nump;
+        tprof[PE4][0] ++;
+        // tprof[MEM_ALN2_E][tid] += __rdtsc() - tim;
+        int num = 0;
+
+        for (int l=0; l<nump; l++)
+        {
+            mem_alnreg_t *a;        
+            SeqPair *sp = &pair_ar[l];
+            a = &(av_v[sp->seqid].a[sp->regid]); // prev
+            //OutScore *o = outScoreArray + l;
+            int prev = a->score;
+            a->score = sp->score;
+            // no further banding
+            if (1)
+            {
+                if (sp->gscore <= 0 || sp->gscore <= a->score - opt->pen_clip3) {
+                    a->qe += sp->qle, a->re += sp->tle;
+                    a->truesc += a->score - sp->h0;
+                } else {
+                    int l_query = seq_[sp->seqid].l_seq;
+                    a->qe = l_query, a->re += sp->gtle;
+                    a->truesc += sp->gscore - sp->h0;
+                }
+                a->w = max_(a->w, w);
+                if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
+                {
+                    int i = 0;
+                    for (i = 0, a->seedcov = 0; i < a->c->n; ++i) {
+                        const mem_seed_t *t = &a->c->seeds[i];
+                        if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                            t->rbeg >= a->rb && t->rbeg + t->len <= a->re)
+                            a->seedcov += t->len;
+                    }
+                }
+            } else {
+                pair_ar_aux[num++] = *sp;
+            }
+        }
+        nump = num;
+        SeqPair *tmp = pair_ar;
+        pair_ar = pair_ar_aux;
+        pair_ar_aux = tmp;
+    }
+
+    // _mm_free(hist);
+    // tprof[CRIGHT][tid] += __rdtsc() - timR;
+    
+    if (numPairsLeft >= *wsize_pair || numPairsRight >= *wsize_pair)
+    {   // refine it!
+        fprintf(stderr, "Error: Unexpected behaviour!!!\n");
+        fprintf(stderr, "Error: assert failed for seqPair size, "
+                "numPairsLeft: %d, numPairsRight %d\nExiting.\n",
+                numPairsLeft, numPairsRight);
+        exit(EXIT_FAILURE);
+    }
+    /* Discard seeds and hence their alignemnts */
+    
+    lim_g[0] = 0;
+    for (int l=1; l<nseq; l++)
+        lim_g[l] += lim_g[l-1];
+            
+    // uint64_t tim = __rdtsc();            
+    int *lim = (int *) calloc(BATCH_SIZE, sizeof(int));
+    assert(lim != NULL);
+
+    for (int l=0; l<nseq; l++)
+    {
+        int s_start = 0, s_end = 0;
+        uint32_t *srtg = srtgg + lim_g[l];
+        
+        int l_query = seq_[l].l_seq;
+        mem_chain_v *chn = &chain_ar[l];        
+        mem_alnreg_v *av = &av_v[l];  // alignment
+        mem_chain_t *c;
+        
+        for (int j=0; j<chn->n; j++)
+        {
+            c = &chn->a[j];
+            assert(c->seqid == l);
+
+            s_end = s_start + c->n;
+
+            uint32_t *srt2 = srtg + s_start;
+            s_start += c->n;
+            
+            int k = 0;
+            for (k = c->n-1; k >= 0; k--)
+            {
+                s = &c->seeds[srt2[k]];
+                int i = 0;
+                int v = 0;
+                for (i = 0; i < av->n && v < lim[l]; ++i)  // test whether extension has been made before
+                {
+                    mem_alnreg_t *p = &av->a[i];
+                    if (p->qb == -1 && p->qe == -1) {
+                        continue;
+                    }
+
+                    int64_t rd;
+                    int qd, w, max_gap;
+                    if (s->rbeg < p->rb || s->rbeg + s->len > p->re || s->qbeg < p->qb
+                        || s->qbeg + s->len > p->qe) {
+                        v++; continue; // not fully contained
+                    }
+                
+                    if (s->len - p->seedlen0 > .1 * l_query) { v++; continue;}
+                    // qd: distance ahead of the seed on query; rd: on reference
+                    qd = s->qbeg - p->qb; rd = s->rbeg - p->rb;
+                    // the maximal gap allowed in regions ahead of the seed
+                    max_gap = cal_max_gap(opt, qd < rd? qd : rd); 
+                    w = max_gap < p->w? max_gap : p->w; // bounded by the band width
+                    if (qd - rd < w && rd - qd < w) break; // the seed is "around" a previous hit
+                    // similar to the previous four lines, but this time we look at the region behind
+                    qd = p->qe - (s->qbeg + s->len); rd = p->re - (s->rbeg + s->len);
+                    max_gap = cal_max_gap(opt, qd < rd? qd : rd);
+                    w = max_gap < p->w? max_gap : p->w;
+                    if (qd - rd < w && rd - qd < w) break;
+                    
+                    v++;
+                }
+                
+                // the seed is (almost) contained in an existing alignment;
+                // further testing is needed to confirm it is not leading
+                // to a different aln
+                if (v < lim[l])
+                {
+                    for (v = k + 1; v < c->n; ++v)
+                    {
+                        const mem_seed_t *t;
+                        if (srt2[v] == UINT_MAX) continue;
+                        t = &c->seeds[srt2[v]];
+                        //if (t->done == H0_) continue;  //check for interferences!!!
+                        // only check overlapping if t is long enough;
+                        // TODO: more efficient by early stopping
+                        if (t->len < s->len * .95) continue; 
+                        if (s->qbeg <= t->qbeg && s->qbeg + s->len - t->qbeg >= s->len>>2 &&
+                            t->qbeg - s->qbeg != t->rbeg - s->rbeg) break;
+                        if (t->qbeg <= s->qbeg && t->qbeg + t->len - s->qbeg >= s->len>>2 &&
+                            s->qbeg - t->qbeg != s->rbeg - t->rbeg) break;
+                    }
+                    if (v == c->n) {                  // no overlapping seeds; then skip extension
+                        mem_alnreg_t *ar = &(av_v[l].a[s->aln]);
+                        ar->qb = ar->qe = -1;         // purge the alingment
+                        srt2[k] = UINT_MAX;
+                        tprof[PE18][tid]++;
+                        continue;
+                    }
+                }                
+                lim[l]++;
+            }
+        }
+    }
+    free(srtgg);
+    free(srt);
+    free(lim);
+    // tprof[MEM_ALN2_DOWN][tid] += __rdtsc() - tim;    
+}
+
+
+
+void mem_chain2aln_across_reads_V2_my(const mem_opt_t *opt, const bntseq_t *bns,
+                                   const uint8_t *pac, bseq1_t *seq_, int nseq,
+                                   mem_chain_v* chain_ar, mem_alnreg_v *av_v,
+                                   mem_cache *mmc, uint8_t *ref_string, int tid)
+{
+    // printf_(MY, "\treal start\n");
+    SeqPair *seqPairArrayAux      = mmc->seqPairArrayAux[tid];
+    SeqPair *seqPairArrayLeft128  = mmc->seqPairArrayLeft128[tid];
+    SeqPair *seqPairArrayRight128 = mmc->seqPairArrayRight128[tid];
+    int64_t *wsize_pair = &(mmc->wsize[tid]);
+
+    uint8_t *seqBufLeftRef  = mmc->seqBufLeftRef[tid*CACHE_LINE]; 
+    uint8_t *seqBufRightRef = mmc->seqBufRightRef[tid*CACHE_LINE];
+    uint8_t *seqBufLeftQer  = mmc->seqBufLeftQer[tid*CACHE_LINE]; 
+    uint8_t *seqBufRightQer = mmc->seqBufRightQer[tid*CACHE_LINE];
+    int64_t *wsize_buf_ref = &(mmc->wsize_buf_ref[tid*CACHE_LINE]);
+    int64_t *wsize_buf_qer = &(mmc->wsize_buf_qer[tid*CACHE_LINE]);
+    
+    // fprintf(stderr, "thread %d start\n", tid);
+    int32_t *lim_g = mmc->lim[tid];
+    double cpu_time, real_time;
+
+    mem_seed_t *s;
+    int64_t l_pac = bns->l_pac, rmax[8] __attribute__((aligned(64)));
+    
+    int numPairsLeft = 0, numPairsRight = 0;
+    int numPairsLeft1 = 0, numPairsRight1 = 0;
+    int numPairsLeft128 = 0, numPairsRight128 = 0;
+    int numPairsLeft16 = 0, numPairsRight16 = 0;
+
+    int64_t leftRefOffset = 0, rightRefOffset = 0;
+
+
+    int64_t leftQerOffset = 0, rightQerOffset = 0;
+
+    int srt_size = MAX_SEEDS_PER_READ, fac = FAC;
+    uint64_t *srt = (uint64_t *) malloc(srt_size * 8);
+    uint32_t *srtgg = (uint32_t*) malloc(nseq * SEEDS_PER_READ * fac * sizeof(uint32_t));
+
+    int spos = 0;
+    int maxQerLeft = 0, maxRefLeft = 0;
+    int maxQerRight = 0, maxRefRight = 0;
+    // printf_(MY, "\tfetch start\n");
+    // cpu_time = cputime(); real_time = realtime();
+    for (int l=0; l<nseq; l++)
+    {
+        int max = 0;
+        uint8_t *rseq = 0;
+        
+        uint32_t *srtg = srtgg;
+        lim_g[l+1] = 0;
+        
+        const uint8_t *query = (uint8_t *) seq_[l].seq;
+        int l_query = seq_[l].l_seq;
+    
+        mem_chain_v *chn = &chain_ar[l];        
+        mem_alnreg_v *av = &av_v[l];  // alignment
+        mem_chain_t *c;
+
+        _mm_prefetch((const char*) query, _MM_HINT_NTA);
+        
+        // aln mem allocation
+        av->m = 0;
+        for (int j=0; j<chn->n; j++) {
+            c = &chn->a[j]; av->m += c->n;
+        }
+        av->a = (mem_alnreg_t*)calloc(av->m, sizeof(mem_alnreg_t));
+
+        // aln mem allocation ends
+        for (int j=0; j<chn->n; j++)
+        {
+            c = &chn->a[j];
+            assert(c->seqid == l);
+            
+            int64_t tmp = 0;
+            if (c->n == 0) continue;
+            
+            _mm_prefetch((const char*) (srtg + spos + 64), _MM_HINT_NTA);
+            _mm_prefetch((const char*) (lim_g), _MM_HINT_NTA);
+            
+            // get the max possible span
+            rmax[0] = l_pac<<1; rmax[1] = 0;
+
+            for (int i = 0; i < c->n; ++i) {
+                int64_t b, e;
+                const mem_seed_t *t = &c->seeds[i];
+                b = t->rbeg - (t->qbeg + cal_max_gap(opt, t->qbeg));
+                e = t->rbeg + t->len + ((l_query - t->qbeg - t->len) +
+                                        cal_max_gap(opt, l_query - t->qbeg - t->len));
+
+                tmp = rmax[0];
+                rmax[0] = tmp < b? rmax[0] : b;
+                rmax[1] = (rmax[1] > e)? rmax[1] : e;
+                if (t->len > max) max = t->len;
+            }
+            
+            rmax[0] = rmax[0] > 0? rmax[0] : 0;
+            rmax[1] = rmax[1] < l_pac<<1? rmax[1] : l_pac<<1;
+            if (rmax[0] < l_pac && l_pac < rmax[1])
+            {
+                if (c->seeds[0].rbeg < l_pac) rmax[1] = l_pac;
+                else rmax[0] = l_pac;
+            }
+            
+
+            /* retrieve the reference sequence */
+            {
+                int rid = 0;
+                // free rseq
+                rseq = bns_fetch_seq_v2(bns, pac, &rmax[0],
+                                        c->seeds[0].rbeg,
+                                        &rmax[1], &rid, ref_string,
+                                        (uint8_t*) seqPairArrayAux);
+                assert(c->rid == rid);
+            }
+
+            _mm_prefetch((const char*) rseq, _MM_HINT_NTA);
+            
+            if (c->n > srt_size) {
+                srt_size = c->n + 10;
+                srt = (uint64_t *) realloc(srt, srt_size * 8);
+            }
+            
+            for (int i = 0; i < c->n; ++i) 
+                srt[i] = (uint64_t)c->seeds[i].score<<32 | i;
+
+            if (c->n > 1) 
+                ks_introsort_64(c->n, srt);
+            
+            if ((spos + c->n) > SEEDS_PER_READ * fac * nseq) {
+                fac <<= 1;
+                srtgg = (uint32_t *) realloc(srtgg, nseq * SEEDS_PER_READ * fac * sizeof(uint32_t));
+            }
+            
+            for (int i = 0; i < c->n; ++i) {
+                srtg[spos++] = srt[i];
+                // if (srtg[spos-1] >= 4294967295) {
+                //     printf_(MY, "srt[i]: %llu\n", srt[i]);
+                // }
+            }
+
+            lim_g[l+1] += c->n;
+            
+            for (int k=c->n-1; k >= 0; k--)
+            {
+                s = &c->seeds[(uint32_t)srt[k]];
+
+                mem_alnreg_t *a;
+                a = &av->a[av->n++];
+                memset_s(a, sizeof(mem_alnreg_t), 0);
+                
+                s->aln = av->n-1;
+                
+                a->w = opt->w;
+                a->score = a->truesc = -1;
+                a->rid = c->rid;
+                a->frac_rep = c->frac_rep;
+                a->seedlen0 = s->len;
+                a->c = c; //ptr
+                a->rb = a->qb = a->re = a->qe = H0_;
+                
+                tprof[PE19][tid] ++;
+                
+                int flag = 0;
+                std::pair<int, int> pr;
+                if (s->qbeg)  // left extension
+                {
+                    SeqPair sp;
+                    sp.h0 = s->len * opt->a;
+                    sp.seqid = c->seqid;
+                    sp.regid = av->n - 1;
+                        
+                    if (numPairsLeft >= *wsize_pair) {
+                        fprintf(stderr, "[0000][%0.4d] Re-allocating seqPairArrays, in Left\n", tid);
+                        *wsize_pair += 1024;
+                        seqPairArrayAux = (SeqPair *) realloc(seqPairArrayAux,
+                                                              (*wsize_pair + MAX_LINE_LEN)
+                                                              * sizeof(SeqPair));
+                        mmc->seqPairArrayAux[tid] = seqPairArrayAux;
+                        seqPairArrayLeft128 = (SeqPair *) realloc(seqPairArrayLeft128,
+                                                                  (*wsize_pair + MAX_LINE_LEN)
+                                                                  * sizeof(SeqPair));
+                        mmc->seqPairArrayLeft128[tid] = seqPairArrayLeft128;
+                        seqPairArrayRight128 = (SeqPair *) realloc(seqPairArrayRight128,
+                                                                   (*wsize_pair + MAX_LINE_LEN)
+                                                                   * sizeof(SeqPair));
+                        mmc->seqPairArrayRight128[tid] = seqPairArrayRight128;
+                    }
+
+                    
+                    sp.idq = leftQerOffset;
+                    sp.idr = leftRefOffset;
+                    
+                    leftQerOffset += s->qbeg;
+                    if (leftQerOffset >= *wsize_buf_qer)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufQers in %s (left)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_qer;
+                        *wsize_buf_qer *= 2;
+                        uint8_t *seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufLeftQer[tid*CACHE_LINE] = seqBufLeftQer = seqBufQer_;
+                        
+                        seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufRightQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufRightQer[tid*CACHE_LINE] = seqBufRightQer = seqBufQer_;      
+                    }
+                    
+                    uint8_t *qs = seqBufLeftQer + sp.idq;
+                    for (int i = 0; i < s->qbeg; ++i) qs[i] = query[s->qbeg - 1 - i];
+                    
+                    tmp = s->rbeg - rmax[0];
+                    leftRefOffset += tmp;
+                    if (leftRefOffset >= *wsize_buf_ref)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufRefs in %s (left)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_ref;
+                        *wsize_buf_ref *= 2;
+                        uint8_t *seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufLeftRef[tid*CACHE_LINE] = seqBufLeftRef = seqBufRef_;
+                        
+                        seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufRightRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufRightRef[tid*CACHE_LINE] = seqBufRightRef = seqBufRef_;              
+                    }
+                    
+                    uint8_t *rs = seqBufLeftRef + sp.idr;                    
+                    for (int64_t i = 0; i < tmp; ++i) rs[i] = rseq[tmp - 1 - i]; //seq1
+                    
+                    sp.len2 = s->qbeg;
+                    maxQerLeft = maxQerLeft < sp.len2 ? sp.len2 : maxQerLeft;
+                    sp.len1 = tmp;
+                    maxRefLeft = maxRefLeft < sp.len1 ? sp.len1 : maxRefLeft;
+                    int minval = sp.h0 + min_(sp.len1, sp.len2) * opt->a;
+                    if (sp.len1 < MAX_SEQ_LEN8 && sp.len2 < MAX_SEQ_LEN8 && minval < MAX_SEQ_LEN8) {
+                        numPairsLeft128++;
+                    }
+                    else if (sp.len1 < MAX_SEQ_LEN16 && sp.len2 < MAX_SEQ_LEN16 && minval < MAX_SEQ_LEN16){
+                        numPairsLeft16++;
+                    }
+                    else {                          
+                        numPairsLeft1++;
+                    }
+                    
+                    seqPairArrayLeft128[numPairsLeft] = sp;
+                    numPairsLeft ++;
+                    a->qb = s->qbeg; a->rb = s->rbeg;
+                }
+                else
+                {
+                    flag = 1;
+                    a->score = a->truesc = s->len * opt->a, a->qb = 0, a->rb = s->rbeg;
+                }
+
+                if (s->qbeg + s->len != l_query)  // right extension
+                {
+                    int64_t qe = s->qbeg + s->len;
+                    int64_t re = s->rbeg + s->len - rmax[0];
+                    assert(re >= 0);                    
+                    SeqPair sp;
+
+                    sp.h0 = H0_; //random number
+                    sp.seqid = c->seqid;
+                    sp.regid = av->n - 1;
+
+                    if (numPairsRight >= *wsize_pair)
+                    {
+                        fprintf(stderr, "[0000] [%0.4d] Re-allocating seqPairArrays Right\n", tid);
+                        *wsize_pair += 1024;
+                        seqPairArrayAux = (SeqPair *) realloc(seqPairArrayAux,
+                                                              (*wsize_pair + MAX_LINE_LEN)
+                                                              * sizeof(SeqPair));
+                        mmc->seqPairArrayAux[tid] = seqPairArrayAux;
+                        seqPairArrayLeft128 = (SeqPair *) realloc(seqPairArrayLeft128,
+                                                                  (*wsize_pair + MAX_LINE_LEN)
+                                                                  * sizeof(SeqPair));
+                        mmc->seqPairArrayLeft128[tid] = seqPairArrayLeft128;
+                        seqPairArrayRight128 = (SeqPair *) realloc(seqPairArrayRight128,
+                                                                   (*wsize_pair + MAX_LINE_LEN)
+                                                                   * sizeof(SeqPair));
+                        mmc->seqPairArrayRight128[tid] = seqPairArrayRight128;
+                    }
+                    
+                    sp.len2 = l_query - qe;
+                    sp.len1 = rmax[1] - rmax[0] - re;
+                    maxQerRight = maxQerRight < sp.len2 ? sp.len2 : maxQerRight;
+                    maxRefRight = maxRefRight < sp.len1 ? sp.len1 : maxRefRight;
+                    sp.idq = rightQerOffset;
+                    sp.idr = rightRefOffset;
+                    
+                    rightQerOffset += sp.len2;
+                    if (rightQerOffset >= *wsize_buf_qer)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufQers in %s (right)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_qer;
+                        *wsize_buf_qer *= 2;
+                        uint8_t *seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufLeftQer[tid*CACHE_LINE] = seqBufLeftQer = seqBufQer_;
+                        
+                        seqBufQer_ = (uint8_t*)
+                            _mm_realloc(seqBufRightQer, tmp, *wsize_buf_qer, sizeof(uint8_t)); 
+                        mmc->seqBufRightQer[tid*CACHE_LINE] = seqBufRightQer = seqBufQer_;      
+                    }
+
+                    rightRefOffset += sp.len1;
+                    if (rightRefOffset >= *wsize_buf_ref)
+                    {
+                        fprintf(stderr, "[%0.4d] Re-allocating (doubling) seqBufRefs in %s (right)\n",
+                                tid, __func__);
+                        int64_t tmp = *wsize_buf_ref;
+                        *wsize_buf_ref *= 2;
+                        uint8_t *seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufLeftRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufLeftRef[tid*CACHE_LINE] = seqBufLeftRef = seqBufRef_;
+                        
+                        seqBufRef_ = (uint8_t*)
+                            _mm_realloc(seqBufRightRef, tmp, *wsize_buf_ref, sizeof(uint8_t)); 
+                        mmc->seqBufRightRef[tid*CACHE_LINE] = seqBufRightRef = seqBufRef_;              
+                    }
+                    
+                    tprof[PE23][tid] += sp.len1 + sp.len2;
+
+                    uint8_t *qs = seqBufRightQer + sp.idq;
+                    uint8_t *rs = seqBufRightRef + sp.idr;
+
+                    for (int i = 0; i < sp.len2; ++i) qs[i] = query[qe + i];
+
+                    for (int i = 0; i < sp.len1; ++i) rs[i] = rseq[re + i]; //seq1
+
+                    int minval = sp.h0 + min_(sp.len1, sp.len2) * opt->a;
+                    
+                    if (sp.len1 < MAX_SEQ_LEN8 && sp.len2 < MAX_SEQ_LEN8 && minval < MAX_SEQ_LEN8) {
+                        numPairsRight128++;
+                    }
+                    else if(sp.len1 < MAX_SEQ_LEN16 && sp.len2 < MAX_SEQ_LEN16 && minval < MAX_SEQ_LEN16) {
+                        numPairsRight16++;
+                    }
+                    else {
+                        numPairsRight1++;
+                    }
+                    seqPairArrayRight128[numPairsRight] = sp;
+                    numPairsRight ++;
+                    a->qe = qe; a->re = rmax[0] + re;
+                }
+                else
+                {
+                    a->qe = l_query, a->re = s->rbeg + s->len;
+                    // seedcov business, this "if" block should be redundant, check and remove.
+                    if (a->rb != H0_ && a->qb != H0_)
+                    {
+                        int i;
+                        for (i = 0, a->seedcov = 0; i < c->n; ++i)
+                        {
+                            const mem_seed_t *t = &c->seeds[i];
+                            if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                                t->rbeg >= a->rb && t->rbeg + t->len <= a->re) // seed fully contained
+                                a->seedcov += t->len;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // fprintf(stderr, "preprocessing takes %.3f CPU sec, %.3f real sec\n", cputime()-cpu_time, realtime()-real_time);
+    // cpu_time = cputime(); real_time = realtime();
+    // Now, process all the collected seq-pairs
+    // Left
+    int32_t *hist = (int32_t *)_mm_malloc((MAX_SEQ_LEN8 + MAX_SEQ_LEN16 + 32) *
+                                          sizeof(int32_t), 64);
+    int i;
+    SeqPair *pair_ar = seqPairArrayLeft128;
+    SeqPair *pair_ar_aux = seqPairArrayAux;
+    int nump = numPairsLeft;
+    // fprintf(stderr, "thread %d left start\n", tid);
+    // Get shared memory size
+    unsigned minSize = maxQerLeft < maxRefLeft ? maxQerLeft : maxRefLeft;
+
+    // sortPairsLen(pair_ar, nump, seqPairArrayAux, hist);
+    // for (int uu = 0; uu < 100; uu++) {
+    //     SeqPair *sp = pair_ar + uu + 50000;
+    //     fprintf(stderr, "%d Qerlen: %d, Reflen: %d\n", uu, sp->len2, sp->len1);
+    // }
+    // SeqPair *tmpPair1, *tmpPair2;
+
+    // SeqPair *pair_ar_d;
+    // uint8_t *seqBufQer_d, *seqBufRef_d;
+    // int8_t *mat_d;
+    // int max_batch_size = 100000;
+    int maxRef = (maxRefLeft > maxRefRight) ? maxRefLeft : maxRefRight;
+    int maxQer = (maxQerLeft > maxQerRight) ? maxQerLeft : maxQerRight;
+    // kernel::device_initialize(pair_ar_d, seqBufQer_d, seqBufRef_d, max_batch_size, maxRef, maxQer, tid, mat_d, opt->a, opt->b);
+    // kernel::mytest sw_driver;
+    // sw_driver.device_initialize(max_batch_size, maxRef, maxQer, tid, opt->a, opt->b);
+    // printf_(MY, "\tGPU start\n");
+    for ( i=0; i<1; i++)
+    {
+        /* sort and divide test */
+        // SeqPair *tmpPair = pair_ar;
+        // SeqPair *lastPair = tmpPair + 9999;
+        // int tmp_nump = 10000;
+        // int tmp_minSize = lastPair->len2;
+        // int tmp_maxRef = lastPair->len1;
+        // int tmp_maxQer = lastPair->len2;
+        // kernel::gpu_kernel_wrapper(tmpPair, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, tmp_nump, tmp_minSize, tmp_maxRef, tmp_maxQer, 
+        //                            opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        // tmpPair = pair_ar+10000;
+        // lastPair = tmpPair + 9999;
+        // tmp_nump = 10000;
+        // tmp_minSize = lastPair->len2;
+        // tmp_maxRef = lastPair->len1;
+        // tmp_maxQer = lastPair->len2;
+        // kernel::gpu_kernel_wrapper(tmpPair, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, tmp_nump, tmp_minSize, tmp_maxRef, tmp_maxQer, 
+        //                            opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        // tmpPair = pair_ar+20000;
+        // tmp_nump = 10000;
+        // lastPair = tmpPair + 9999;
+        // tmp_minSize = lastPair->len2;
+        // tmp_maxRef = lastPair->len1;
+        // tmp_maxQer = lastPair->len2;
+        // kernel::gpu_kernel_wrapper(tmpPair, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, tmp_nump, tmp_minSize, tmp_maxRef, tmp_maxQer, 
+        //                            opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        
+        // tmpPair = pair_ar + 30000;
+        // tmp_nump = nump - 30000;
+        // kernel::gpu_kernel_wrapper(tmpPair, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, tmp_nump, minSize, maxRef, maxQer, 
+        //                            opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        /*----------------------*/
+        fprintf(stderr, "AAAA");
+        kernel::gpu_kernel_wrapper(pair_ar, seqBufLeftQer, seqBufLeftRef, leftRefOffset, leftQerOffset, nump, minSize, maxRef, maxQer, 
+                                   opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        int32_t w = opt->w << i;
+
+        tprof[PE1][0] += nump;
+        tprof[PE2][0] ++;
+
+        int num = 0;
+        for (int l=0; l<nump; l++)
+        {           
+            mem_alnreg_t *a;
+            SeqPair *sp = &pair_ar[l];
+            a = &(av_v[sp->seqid].a[sp->regid]); // prev
+
+            int prev = a->score;
+            a->score = sp->score;
+
+            if (sp->gscore <= 0 || sp->gscore <= a->score - opt->pen_clip5) {
+                a->qb -= sp->qle; a->rb -= sp->tle;
+                a->truesc = a->score;
+            } else {
+                a->qb = 0; a->rb -= sp->gtle;
+                a->truesc = sp->gscore;
+            }
+
+            a->w = max_(a->w, w);
+            if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
+            {
+                int i = 0;
+                for (i = 0, a->seedcov = 0; i < a->c->n; ++i){
+                    const mem_seed_t *t = &(a->c->seeds[i]);
+                    if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                        t->rbeg >= a->rb && t->rbeg + t->len <= a->re) {
+                            a->seedcov += t->len;
+                        }
+
+                }
+            }
+        }
+    }
+    // fprintf(stderr, "left takes %.3f CPU sec, %.3f real sec\n", cputime()-cpu_time, realtime()-real_time);
+    // cpu_time = cputime(); real_time = realtime();
+    // Right, scalar
+    for (int l=0; l<numPairsRight; l++) {
+        mem_alnreg_t *a;        
+        SeqPair *sp = &seqPairArrayRight128[l];
+        a = &(av_v[sp->seqid].a[sp->regid]); // prev
+        sp->h0 = a->score;
+    }
+
+    // ************************* Right, vector int8 **********************
+    pair_ar = seqPairArrayRight128;
+    pair_ar_aux = seqPairArrayAux;
+    nump = numPairsRight;
+    minSize = maxQerRight < maxRefRight ? maxQerRight : maxRefRight;
+    // fprintf(stderr, "thread %d start right\n", tid);
+    for ( i=0; i<1; i++)
+    {   
+        // kernel::gpu_kernel_wrapper(pair_ar, seqBufRightQer, seqBufRightRef, rightRefOffset, rightQerOffset, nump, minSize, maxRefRight, maxQerRight, opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        fprintf(stderr, "BBBB");
+        kernel::gpu_kernel_wrapper(pair_ar, seqBufRightQer, seqBufRightRef, rightRefOffset, rightQerOffset, nump, minSize, maxRef, maxQer, opt->a, opt->b, opt->o_ins + opt->e_ins, opt->e_ins, tid);
+        int32_t w = opt->w << i;
+        
+        tprof[PE3][0] += nump;
+        tprof[PE4][0] ++;
+        // tprof[MEM_ALN2_E][tid] += __rdtsc() - tim;
+        int num = 0;
+
+        for (int l=0; l<nump; l++)
+        {
+            mem_alnreg_t *a;        
+            SeqPair *sp = &pair_ar[l];
+            a = &(av_v[sp->seqid].a[sp->regid]); // prev
+            //OutScore *o = outScoreArray + l;
+            int prev = a->score;
+            a->score = sp->score;
+
+            if (sp->gscore <= 0 || sp->gscore <= a->score - opt->pen_clip3) {
+                a->qe += sp->qle, a->re += sp->tle;
+                a->truesc += a->score - sp->h0;
+            } else {
+                int l_query = seq_[sp->seqid].l_seq;
+                a->qe = l_query, a->re += sp->gtle;
+                a->truesc += sp->gscore - sp->h0;
+            }
+            a->w = max_(a->w, w);
+            if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
+            {
+                int i = 0;
+                for (i = 0, a->seedcov = 0; i < a->c->n; ++i) {
+                    const mem_seed_t *t = &a->c->seeds[i];
+                    if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                        t->rbeg >= a->rb && t->rbeg + t->len <= a->re)
+                        a->seedcov += t->len;
+                }
+            }
+        }
+    }
+    // fprintf(stderr, "right takes %.3f CPU sec, %.3f real sec\n", cputime()-cpu_time, realtime()-real_time);
+    _mm_free(hist);
+    if (numPairsLeft >= *wsize_pair || numPairsRight >= *wsize_pair)
+    {   // refine it!
+        fprintf(stderr, "Error: Unexpected behaviour!!!\n");
+        fprintf(stderr, "Error: assert failed for seqPair size, "
+                "numPairsLeft: %d, numPairsRight %d\nExiting.\n",
+                numPairsLeft, numPairsRight);
+        exit(EXIT_FAILURE);
+    }
+
+    // kernel::device_free(pair_ar_d, seqBufQer_d, seqBufRef_d, mat_d);
+
+    /* Discard seeds and hence their alignemnts */
+    lim_g[0] = 0;
+    for (int l=1; l<nseq; l++)
+        lim_g[l] += lim_g[l-1];
+            
+    // uint64_t tim = __rdtsc();            
+    int *lim = (int *) calloc(BATCH_SIZE, sizeof(int));
+    assert(lim != NULL);
+    assert(srtgg != NULL);
+    // printf_(MY, "\tPost process aln start\n");
+    for (int l=0; l<nseq; l++)
+    {
+        int s_start = 0, s_end = 0;
+        uint32_t *srtg = srtgg + lim_g[l];
+        
+        int l_query = seq_[l].l_seq;
+        mem_chain_v *chn = &chain_ar[l];        
+        mem_alnreg_v *av = &av_v[l];  // alignment
+        mem_chain_t *c;
+        
+        for (int j=0; j<chn->n; j++)
+        {
+            c = &chn->a[j];
+            assert(c->seqid == l);
+
+            s_end = s_start + c->n;
+
+            uint32_t *srt2 = srtg + s_start;
+            s_start += c->n;
+            
+            int k = 0;
+            for (k = c->n-1; k >= 0; k--)
+            {
+                s = &c->seeds[srt2[k]];
+                // if (srt2[k] >= 4294967295) {
+                //     printf_(MY, "\t\tsrt2[k]: %llu, k: %d, lim_g[l]: %d, s_start: %d\n", srt2[k], k, lim_g[l], s_start-c->n);
+                //     // s = &c->seeds[0];
+                // }
+                int i = 0;
+                int v = 0;
+                for (i = 0; i < av->n && v < lim[l]; ++i)  // test whether extension has been made before
+                {
+                    mem_alnreg_t *p = &av->a[i];
+                    if (p->qb == -1 && p->qe == -1) {
+                        continue;
+                    }
+
+                    int64_t rd;
+                    int qd, w, max_gap;
+                    int tmp;
+                    tmp = p->rb;
+                    tmp = p->re;
+                    tmp = p->qb;
+                    // fprintf(stderr, "\t\t Seed pointer: %p\n", s);
+                    tmp = s->rbeg;
+                    tmp = s->len;
+                    tmp = s->qbeg;
                     if (s->rbeg < p->rb || s->rbeg + s->len > p->re || s->qbeg < p->qb
                         || s->qbeg + s->len > p->qe) {
                         v++; continue; // not fully contained

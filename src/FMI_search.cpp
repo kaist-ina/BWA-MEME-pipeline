@@ -701,7 +701,7 @@ void FMI_search::getSMEMsAllPosOneThread(uint8_t *enc_qdb,
 
     int32_t numActive = numReads;
     (*__numTotalSmem) = 0;
-
+    int loop = 0;
     do
     {
         int32_t head = 0;
@@ -730,8 +730,9 @@ void FMI_search::getSMEMsAllPosOneThread(uint8_t *enc_qdb,
                                 matchArray,
                                 __numTotalSmem);
         numActive = tail;
+        loop++;
     } while(numActive > 0);
-
+    // fprintf(stderr, "loop: %d, numReads: %d\n", loop, numReads);
     _mm_free(query_pos_array);
 }
 

@@ -87,4 +87,5 @@ typedef struct kt_for_t {
 
 void kt_pipeline(int n_threads, int (*func)(void*), void *shared_data, int n_steps);
 void kt_for(void (*func)(void*,long,long,int), void *data, int n);
+void kt_for_aln(void (*func)(void*,long,long,int), void *data, int n);
 #endif

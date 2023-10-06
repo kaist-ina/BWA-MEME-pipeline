@@ -507,7 +507,8 @@ uint8_t *bns_fetch_seq_v2(const bntseq_t *bns, const uint8_t *pac,
                 __func__, (long)*beg, (long)mid, (long)*end, (long)len, seq, *rid, (long)far_beg, (long)far_end);
     }
     assert(seq && *end - *beg == len); // assertion failure should never happen
-
+	// fprintf(stderr, "begin=%ld, mid=%ld, end=%ld, len=%ld, seq=%p, rid=%d, far_beg=%ld, far_end=%ld\n",
+    //             (long)*beg, (long)mid, (long)*end, (long)len, seq, *rid, (long)far_beg, (long)far_end);
     return seq;
 }
 

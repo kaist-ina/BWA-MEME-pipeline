@@ -87,7 +87,7 @@ typedef struct mem_opt_t {
     int pen_clip5,pen_clip3;// clipping penalty. This score is not deducted from the DP score.
     int w;                  // band width
     int zdrop;              // Z-dropoff
-
+    int my;                 // 1 for gpu version, 0 for original version
     uint64_t max_mem_intv;
 
     int T;                  // output score threshold; only affecting output
@@ -341,6 +341,10 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                                    const uint8_t *pac, bseq1_t *seq_, int nseq,
                                    mem_chain_v* chain_ar, mem_alnreg_v *av_v,
                                    mem_cache *mmc, uint8_t *ref_string, int tid);
+void mem_chain2aln_across_reads_V2_ori(const mem_opt_t *opt, const bntseq_t *bns,
+                                   const uint8_t *pac, bseq1_t *seq_, int nseq,
+                                   mem_chain_v* chain_ar, mem_alnreg_v *av_v,
+                                   mem_cache *mmc, uint8_t *ref_string, int tid);
 
 int mem_sam_pe_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
                          const uint8_t *pac, const mem_pestat_t pes[4],
@@ -411,7 +415,7 @@ int mem_sam_pe(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac,
  */
 void mem_process_seqs(mem_opt_t *opt, int64_t n_processed,
                       int n, bseq1_t *seqs, const mem_pestat_t *pes0,
-                      worker_t &w);
+                      worker_t *w, int step);
 
 
 /**

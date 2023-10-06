@@ -109,6 +109,10 @@ int64_t BandedPairWiseSW::getTicks()
 
     return totalTicks;
 }
+
+// GPU code
+
+
 // ------------------------------------------------------------------------------------
 // Banded SWA - scalar code
 // ------------------------------------------------------------------------------------
@@ -164,9 +168,9 @@ int BandedPairWiseSW::scalarBandedSWA(int qlen, const uint8_t *query,
         //int8_t *q = &qp[(target[i]-48) * qlen];   // sub 48
         int8_t *q = &qp[(target[i]) * qlen];
         // apply the band and the constraint (if provided)
-        if (beg < i - w) beg = i - w;
-        if (end > i + w + 1) end = i + w + 1;
-        if (end > qlen) end = qlen;
+        // if (beg < i - w) beg = i - w;
+        // if (end > i + w + 1) end = i + w + 1;
+        // if (end > qlen) end = qlen;
         // compute the first column
         if (beg == 0) {
             h1 = h0 - (o_del + e_del * (i + 1));
@@ -203,7 +207,7 @@ int BandedPairWiseSW::scalarBandedSWA(int qlen, const uint8_t *query,
             max_ie = gscore > h1? max_ie : i;
             gscore = gscore > h1? gscore : h1;
         }
-        if (m == 0) break;
+        // if (m == 0) break;
         if (m > max) {
             max = m, max_i = i, max_j = mj;
             max_off = max_off > abs(mj - i)? max_off : abs(mj - i);
@@ -219,7 +223,7 @@ int BandedPairWiseSW::scalarBandedSWA(int qlen, const uint8_t *query,
         beg = j;
         for (j = end; (j >= beg) && eh[j].h == 0 && eh[j].e == 0; --j);
         end = j + 2 < qlen? j + 2 : qlen;
-        //beg = 0; end = qlen; // uncomment this line for debugging
+        beg = 0; end = qlen; // uncomment this line for debugging
     }
     free(eh); free(qp);
     if (_qle) *_qle = max_j + 1;
@@ -245,7 +249,8 @@ void BandedPairWiseSW::scalarBandedSWAWrapper(SeqPair *seqPairArray,
                                               int numPairs,
                                               int nthreads,
                                               int32_t w) {
-
+                                                
+    // if (numPairs > 0) fprintf(stderr, "numPairs: %d, thread: %d, bw: %d\n", numPairs, nthreads, w);
     for (int i=0; i<numPairs; i++)
     {
         SeqPair *p = seqPairArray + i;
@@ -417,7 +422,11 @@ void BandedPairWiseSW::getScores8(SeqPair *pairArray,
                                   int32_t w)
 {
     int64_t startTick, endTick;
-    
+    // if (numPairs > 0) fprintf(stderr, "bb numPairs: %d\n", numPairs);
+
+
+    // Original Code
+    // fprintf(stderr, "ref: %s\n", seqBufRef[0]);
     smithWatermanBatchWrapper8(pairArray, seqBufRef, seqBufQer, numPairs, numThreads, w);
 
 #if MAXI
@@ -959,6 +968,7 @@ void BandedPairWiseSW::smithWaterman256_8(uint8_t seq1SoA[],
         _mm256_store_si256((__m256i *)(F + j * SIMD_WIDTH8), zero256);
         
         
+
         /* exit due to zero score by a row */
         uint32_t cval = 0;
         __m256i bmaxScore256 = maxScore256;
@@ -1122,7 +1132,7 @@ void BandedPairWiseSW::getScores16(SeqPair *pairArray,
                                    int32_t w)
 {
     int64_t startTick, endTick;
-
+    // if (numPairs > 0) fprintf(stderr, "cc numPairs: %d\n", numPairs);
     smithWatermanBatchWrapper16(pairArray, seqBufRef, seqBufQer, numPairs, numThreads, w);
 
 
@@ -1977,7 +1987,6 @@ void BandedPairWiseSW::getScores8(SeqPair *pairArray,
     assert(SIMD_WIDTH8 == 64 && SIMD_WIDTH16 == 32);
     int i;
     int64_t startTick, endTick;
-
     smithWatermanBatchWrapper8(pairArray, seqBufRef, seqBufQer, numPairs, numThreads, w);
     
 #if MAXI
@@ -2670,7 +2679,6 @@ void BandedPairWiseSW::getScores16(SeqPair *pairArray,
 {
     int i;
     int64_t startTick, endTick;
-
     smithWatermanBatchWrapper16(pairArray, seqBufRef, seqBufQer, numPairs, numThreads, w);
     
 #if MAXI
@@ -3473,6 +3481,7 @@ void BandedPairWiseSW::getScores16(SeqPair *pairArray,
                                    uint16_t numThreads,
                                    int32_t w)
 {
+    // if (numPairs > 0) fprintf(stderr, "numPairs: %d\n", numPairs);
     smithWatermanBatchWrapper16(pairArray, seqBufRef,
                                 seqBufQer, numPairs,
                                 numThreads, w);
@@ -4203,6 +4212,7 @@ void BandedPairWiseSW::getScores8(SeqPair *pairArray,
                                   int32_t w)
 {
     assert(SIMD_WIDTH8 == 16 && SIMD_WIDTH16 == 8);
+    if (numPairs > 0) fprintf(stderr, "aa numPairs: %d\n", numPairs);
     smithWatermanBatchWrapper8(pairArray, seqBufRef, seqBufQer, numPairs, numThreads, w);
 
     

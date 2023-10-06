@@ -34,6 +34,8 @@ endif
 
 EXE=		bwa-mem2
 #CXX=		icpc
+# CXX=nvcc
+# CXX=gcc
 ifeq ($(CXX), icpc)
 	CC= icc
 else ifeq ($(CXX), g++)
@@ -41,7 +43,7 @@ else ifeq ($(CXX), g++)
 endif		
 ARCH_FLAGS=	-msse -msse2 -msse3 -mssse3 -msse4.1
 MEM_FLAGS=	-DSAIS=1
-CPPFLAGS+=	-DENABLE_PREFETCH -DV17=1 -DMATE_SORT=1 $(MEM_FLAGS) 
+CPPFLAGS+=	-DENABLE_PREFETCH -DV17=1 -DMATE_SORT=1 $(MEM_FLAGS) -w
 # youngmok added -std=c++17 for filesystem support
 INCLUDES=   -Isrc -Iext/safestringlib/include -std=c++17 
 LIBS=		-lpthread -lm -lz -L. -lbwa  -Lext/safestringlib -lsafestring $(STATIC_GCC) 
@@ -51,6 +53,7 @@ OBJS=		src/fastmap.o src/main.o src/utils.o src/memcpy_bwamem.o src/kthread.o \
 			src/bwamem_extra.o src/bwtbuild.o src/QSufSort.o src/bwt_gen.o src/rope.o src/rle.o src/is.o src/kopen.o src/bwtindex.o
 BWA_LIB=    libbwa.a
 SAFE_STR_LIB=    ext/safestringlib/libsafestring.a
+
 
 ifeq ($(arch),sse41)
 	ifeq ($(CXX), icpc)
@@ -90,8 +93,24 @@ else ifneq ($(arch),)
 else
 myall:multi
 endif
+
+# for cuda linking
+SM=35
+CUDA_LIB_FLAGS= -lcudadevrt -lcudart
+# GENCODE_FLAGS= -gencode arch=compute_$(SM),code=sm_$(SM)
+LIBS+= -L/usr/local/cuda-12.1/lib64
+CUDA_TARGET=src/target.o
+
+src/target.o: src/gpuSWA.h src/gpuSWA.cu
+	/usr/local/cuda-12.1/bin/nvcc -c src/gpuSWA.cu -o src/target.o
+
+
+# CXXFLAGS+= $(CUDA_LIB_FLAGS)
+
 #add openmp for multi thread learned index build
+# CXXFLAGS+=	-g -O3 -fopenmp $(ARCH_FLAGS) #-Wall ##-xSSE2
 CXXFLAGS+=	-g -O3 -fpermissive -fopenmp $(ARCH_FLAGS) #-Wall ##-xSSE2
+CXXFLAGS-= -Werror
 
 .PHONY:all clean depend multi
 .SUFFIXES:.cpp .o
@@ -115,11 +134,12 @@ multi:
 	$(CXX) -Wall -O3 src/runsimd.cpp -Iext/safestringlib/include -Lext/safestringlib/ -lsafestring $(STATIC_GCC) -o bwa-mem2
 
 
-$(EXE):$(BWA_LIB) $(SAFE_STR_LIB) src/main.o
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) src/main.o $(BWA_LIB) $(LIBS) -o $@
+$(EXE):$(BWA_LIB) $(SAFE_STR_LIB) src/main.o 
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) src/main.o $(BWA_LIB) $(LIBS) -o $@ -lcudadevrt -lcudart
 
-$(BWA_LIB):$(OBJS)
-	ar rcs $(BWA_LIB) $(OBJS)
+$(BWA_LIB):$(OBJS) $(CUDA_TARGET)
+	ar rcs $(BWA_LIB) $(OBJS) $(CUDA_TARGET)
+
 
 $(SAFE_STR_LIB):
 	cd ext/safestringlib/ && $(MAKE) clean && $(MAKE) CC=$(CC) directories libsafestring.a

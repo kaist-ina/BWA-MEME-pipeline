@@ -729,12 +729,103 @@ void memoryAlloc(ktp_aux_t *aux, worker_t &w, int32_t nreads, int32_t nthreads)
     w.useErt = 0;
     w.useLearned = 0;
 }
+void memoryAlloc_pipe(ktp_aux_t *aux, worker_t *w, int32_t nreads, int32_t nthreads)
+{
+    mem_opt_t *opt = aux->opt;  
+    int32_t memSize = nreads;
+    int32_t readLen = READ_LEN;
 
-ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, worker_t &w)
+    /* Mem allocation section for core kernels */
+    w->regs = NULL; w->chain_ar = NULL; w->seedBuf = NULL;
+
+    w->regs = (mem_alnreg_v *) calloc(memSize, sizeof(mem_alnreg_v));
+    w->chain_ar = (mem_chain_v*) malloc (memSize * sizeof(mem_chain_v));
+    w->seedBuf = (mem_seed_t *) calloc(sizeof(mem_seed_t),  memSize * AVG_SEEDS_PER_READ);
+
+    assert(w->seedBuf  != NULL);
+    assert(w->regs     != NULL);
+    assert(w->chain_ar != NULL);
+
+    w->seedBufSize = BATCH_SIZE * AVG_SEEDS_PER_READ;
+
+    /*** printing ***/
+    int64_t allocMem = memSize * sizeof(mem_alnreg_v) +
+        memSize * sizeof(mem_chain_v) +
+        sizeof(mem_seed_t) * memSize * AVG_SEEDS_PER_READ;
+    fprintf(stderr, "------------------------------------------\n");
+    fprintf(stderr, "1. Memory pre-allocation for Chaining: %0.4lf MB\n", allocMem/1e6);
+
+    
+    /* SWA mem allocation */
+    int64_t wsize = BATCH_SIZE * SEEDS_PER_READ;
+    for(int l=0; l<nthreads; l++)
+    {
+        w->mmc.seqBufLeftRef[l*CACHE_LINE]  = (uint8_t *)
+            _mm_malloc(wsize * MAX_SEQ_LEN_REF * sizeof(int8_t) + MAX_LINE_LEN, 64);
+        w->mmc.seqBufLeftQer[l*CACHE_LINE]  = (uint8_t *)
+            _mm_malloc(wsize * MAX_SEQ_LEN_QER * sizeof(int8_t) + MAX_LINE_LEN, 64);
+        w->mmc.seqBufRightRef[l*CACHE_LINE] = (uint8_t *)
+            _mm_malloc(wsize * MAX_SEQ_LEN_REF * sizeof(int8_t) + MAX_LINE_LEN, 64);
+        w->mmc.seqBufRightQer[l*CACHE_LINE] = (uint8_t *)
+            _mm_malloc(wsize * MAX_SEQ_LEN_QER * sizeof(int8_t) + MAX_LINE_LEN, 64);
+        
+        w->mmc.wsize_buf_ref[l*CACHE_LINE] = wsize * MAX_SEQ_LEN_REF;
+        w->mmc.wsize_buf_qer[l*CACHE_LINE] = wsize * MAX_SEQ_LEN_QER;
+        
+        assert(w->mmc.seqBufLeftRef[l*CACHE_LINE]  != NULL);
+        assert(w->mmc.seqBufLeftQer[l*CACHE_LINE]  != NULL);
+        assert(w->mmc.seqBufRightRef[l*CACHE_LINE] != NULL);
+        assert(w->mmc.seqBufRightQer[l*CACHE_LINE] != NULL);
+    }
+    
+    for(int l=0; l<nthreads; l++) {
+        w->mmc.seqPairArrayAux[l]      = (SeqPair *) malloc((wsize + MAX_LINE_LEN)* sizeof(SeqPair));
+        w->mmc.seqPairArrayLeft128[l]  = (SeqPair *) malloc((wsize + MAX_LINE_LEN)* sizeof(SeqPair));
+        w->mmc.seqPairArrayRight128[l] = (SeqPair *) malloc((wsize + MAX_LINE_LEN)* sizeof(SeqPair));
+        w->mmc.wsize[l] = wsize;
+
+        assert(w->mmc.seqPairArrayAux[l] != NULL);
+        assert(w->mmc.seqPairArrayLeft128[l] != NULL);
+        assert(w->mmc.seqPairArrayRight128[l] != NULL);
+    }   
+
+
+    allocMem = (wsize * MAX_SEQ_LEN_REF * sizeof(int8_t) + MAX_LINE_LEN) * opt->n_threads * 2+
+        (wsize * MAX_SEQ_LEN_QER * sizeof(int8_t) + MAX_LINE_LEN) * opt->n_threads  * 2 +       
+        wsize * sizeof(SeqPair) * opt->n_threads * 3;   
+    fprintf(stderr, "2. Memory pre-allocation for BSW: %0.4lf MB\n", allocMem/1e6);
+
+    for (int l=0; l<nthreads; l++)
+    {
+        w->mmc.wsize_mem[l]     = BATCH_MUL * BATCH_SIZE *               readLen;
+        w->mmc.matchArray[l]    = (SMEM *) _mm_malloc(w->mmc.wsize_mem[l] * sizeof(SMEM), 64);
+        w->mmc.min_intv_ar[l]   = (int32_t *) malloc(w->mmc.wsize_mem[l] * sizeof(int32_t));
+        w->mmc.query_pos_ar[l]  = (int16_t *) malloc(w->mmc.wsize_mem[l] * sizeof(int16_t));
+        w->mmc.enc_qdb[l]       = (uint8_t *) malloc(w->mmc.wsize_mem[l] * sizeof(uint8_t));
+        w->mmc.rid[l]           = (int32_t *) malloc(w->mmc.wsize_mem[l] * sizeof(int32_t));
+        w->mmc.lim[l]           = (int32_t *) _mm_malloc((BATCH_SIZE + 32) * sizeof(int32_t), 64); // candidate not for reallocation, deferred for next round of changes.
+    }
+
+    allocMem = nthreads * BATCH_MUL * BATCH_SIZE * readLen * sizeof(SMEM) +
+        nthreads * BATCH_MUL * BATCH_SIZE * readLen *sizeof(int32_t) +
+        nthreads * BATCH_MUL * BATCH_SIZE * readLen *sizeof(int16_t) +
+        nthreads * BATCH_MUL * BATCH_SIZE * readLen *sizeof(int32_t) +
+        nthreads * (BATCH_SIZE + 32) * sizeof(int32_t);
+    fprintf(stderr, "3. Memory pre-allocation for BWT: %0.4lf MB\n", allocMem/1e6);
+    fprintf(stderr, "------------------------------------------\n");
+
+    w->useErt = 0;
+    w->useLearned = 0;
+}
+
+ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, worker_t *w)
 {
     ktp_aux_t *aux = (ktp_aux_t*) shared;
     ktp_data_t *ret = (ktp_data_t*) data;
+    static int task = 0;
+    static int fetched = 0;
 
+    // printf_(MY, "\t[0000] kt_pipeline step %d start\n", step);
     if (step == 0)
     {
         ktp_data_t *ret = (ktp_data_t *) calloc(1, sizeof(ktp_data_t));
@@ -749,6 +840,7 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                                    &sz);
 
         tprof[READ_IO][0] += __rdtsc() - tim;
+        // printf_(MY, "\t\tFetch %d\n", fetched);
         
         fprintf(stderr, "[0000] read_chunk: %ld, work_chunk_size: %ld, nseq: %d\n",
                 aux->task_size, sz, ret->n_seqs);   
@@ -770,21 +862,21 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
             fprintf(stderr, "\t[0000][ M::%s] read %d sequences (%ld bp)...\n",
                     __func__, ret->n_seqs, (long)size);
         }
-                
+        // printf_(MY, "kt_pipline step0 end\n");
         return ret;
-    } // Step 0         
-    else if (step == 1)  /* Step 2: Main processing-engine */
+    } 
+    else if (step == 1)  /* Step 2: Main processing-engine for seeding (worker_bwt) */
     {
-        static int task = 0;
-        if (w.nreads < ret->n_seqs)
+        
+        if (w->nreads < ret->n_seqs) // ret = w->data
         {
             fprintf(stderr, "[0000] Reallocating initial memory allocations!!\n");
-            free(w.regs); free(w.chain_ar); free(w.seedBuf);
-            w.nreads = ret->n_seqs;
-            w.regs = (mem_alnreg_v *) calloc(w.nreads, sizeof(mem_alnreg_v));
-            w.chain_ar = (mem_chain_v*) malloc (w.nreads * sizeof(mem_chain_v));
-            w.seedBuf = (mem_seed_t *) calloc(sizeof(mem_seed_t), w.nreads * AVG_SEEDS_PER_READ);
-            assert(w.regs != NULL); assert(w.chain_ar != NULL); assert(w.seedBuf != NULL);
+            free(w->regs); free(w->chain_ar); free(w->seedBuf);
+            w->nreads = ret->n_seqs;
+            w->regs = (mem_alnreg_v *) calloc(w->nreads, sizeof(mem_alnreg_v));
+            w->chain_ar = (mem_chain_v*) malloc (w->nreads * sizeof(mem_chain_v));
+            w->seedBuf = (mem_seed_t *) calloc(sizeof(mem_seed_t), w->nreads * AVG_SEEDS_PER_READ);
+            assert(w->regs != NULL); assert(w->chain_ar != NULL); assert(w->seedBuf != NULL);
         }       
                                 
         fprintf(stderr, "[0000] Calling mem_process_seqs.., task: %d\n", task++);
@@ -792,42 +884,44 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
         uint64_t tim = __rdtsc();
         if (opt->flag & MEM_F_SMARTPE)
         {
-            bseq1_t *sep[2];
-            int n_sep[2];
-            mem_opt_t tmp_opt = *opt;
+            // bseq1_t *sep[2];
+            // int n_sep[2];
+            // mem_opt_t tmp_opt = *opt;
 
-            bseq_classify(ret->n_seqs, ret->seqs, n_sep, sep);
+            // bseq_classify(ret->n_seqs, ret->seqs, n_sep, sep);
 
-            fprintf(stderr, "[M::%s] %d single-end sequences; %d paired-end sequences.....\n",
-                    __func__, n_sep[0], n_sep[1]);
+            // fprintf(stderr, "[M::%s] %d single-end sequences; %d paired-end sequences.....\n",
+            //         __func__, n_sep[0], n_sep[1]);
             
-            if (n_sep[0]) {
-                tmp_opt.flag &= ~MEM_F_PE;
-                /* single-end sequences, in the mixture */
-                mem_process_seqs(&tmp_opt,
-                                 aux->n_processed,
-                                 n_sep[0],
-                                 sep[0],
-                                 0,
-                                 w);
+            // if (n_sep[0]) {
+            //     tmp_opt.flag &= ~MEM_F_PE;
+            //     /* single-end sequences, in the mixture */
+            //     mem_process_seqs(&tmp_opt,
+            //                      aux->n_processed,
+            //                      n_sep[0],
+            //                      sep[0],
+            //                      0,
+            //                      w,
+            //                      0);
                 
-                for (int i = 0; i < n_sep[0]; ++i)
-                    ret->seqs[sep[0][i].id].sam = sep[0][i].sam;
-            }
-            if (n_sep[1]) {
-                tmp_opt.flag |= MEM_F_PE;
-                /* paired-end sequences, in the mixture */
-                mem_process_seqs(&tmp_opt,
-                                 aux->n_processed + n_sep[0],
-                                 n_sep[1],
-                                 sep[1],
-                                 aux->pes0,
-                                 w);
+            //     for (int i = 0; i < n_sep[0]; ++i)
+            //         ret->seqs[sep[0][i].id].sam = sep[0][i].sam;
+            // }
+            // if (n_sep[1]) {
+            //     tmp_opt.flag |= MEM_F_PE;
+            //     /* paired-end sequences, in the mixture */
+            //     mem_process_seqs(&tmp_opt,
+            //                      aux->n_processed + n_sep[0],
+            //                      n_sep[1],
+            //                      sep[1],
+            //                      aux->pes0,
+            //                      w,
+            //                      0);
                                 
-                for (int i = 0; i < n_sep[1]; ++i)
-                    ret->seqs[sep[1][i].id].sam = sep[1][i].sam;
-            }
-            free(sep[0]); free(sep[1]);
+            //     for (int i = 0; i < n_sep[1]; ++i)
+            //         ret->seqs[sep[1][i].id].sam = sep[1][i].sam;
+            // }
+            // free(sep[0]); free(sep[1]);
         }
         else {
             /* pure (single/paired-end), reads processing */
@@ -836,14 +930,97 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                              ret->n_seqs,
                              ret->seqs,
                              aux->pes0,
-                             w);
-        }               
+                             w,
+                             1);
+            // mem_process_seqs(opt,
+            //                  aux->n_processed,
+            //                  ret->n_seqs,
+            //                  ret->seqs,
+            //                  aux->pes0,
+            //                  w,
+            //                  2);
+        }
         tprof[MEM_PROCESS2][0] += __rdtsc() - tim;
-                
+        // printf_(MY, "kt_pipeline step1 end\n");
         return ret;
-    }           
-    /* Step 3: Write output */
+    }
+    /* Step 3: Main processing-engine for alignment and sam formatting (worker_bwt, worker_sam) */
     else if (step == 2)
+    {
+        // return ret;
+        // if (w->nreads < ret->n_seqs) // ret = w->data
+        // {
+        //     fprintf(stderr, "[0000] Reallocating initial memory allocations!!\n");
+        //     free(w->regs); free(w->chain_ar); free(w->seedBuf);
+        //     w->nreads = ret->n_seqs;
+        //     w->regs = (mem_alnreg_v *) calloc(w->nreads, sizeof(mem_alnreg_v));
+        //     w->chain_ar = (mem_chain_v*) malloc (w->nreads * sizeof(mem_chain_v));
+        //     w->seedBuf = (mem_seed_t *) calloc(sizeof(mem_seed_t), w->nreads * AVG_SEEDS_PER_READ);
+        //     assert(w->regs != NULL); assert(w->chain_ar != NULL); assert(w->seedBuf != NULL);
+        // }       
+                                
+        // fprintf(stderr, "[0000] Calling mem_process_seqs.., task: %d\n", task++);
+
+        uint64_t tim = __rdtsc();
+        if (opt->flag & MEM_F_SMARTPE)
+        {
+            // bseq1_t *sep[2];
+            // int n_sep[2];
+            // mem_opt_t tmp_opt = *opt;
+
+            // bseq_classify(ret->n_seqs, ret->seqs, n_sep, sep);
+
+            // fprintf(stderr, "[M::%s] %d single-end sequences; %d paired-end sequences.....\n",
+            //         __func__, n_sep[0], n_sep[1]);
+            
+            // if (n_sep[0]) {
+            //     tmp_opt.flag &= ~MEM_F_PE;
+            //     /* single-end sequences, in the mixture */
+            //     mem_process_seqs(&tmp_opt,
+            //                      aux->n_processed,
+            //                      n_sep[0],
+            //                      sep[0],
+            //                      0,
+            //                      w,
+            //                      0);
+                
+            //     for (int i = 0; i < n_sep[0]; ++i)
+            //         ret->seqs[sep[0][i].id].sam = sep[0][i].sam;
+            // }
+            // if (n_sep[1]) {
+            //     tmp_opt.flag |= MEM_F_PE;
+            //     /* paired-end sequences, in the mixture */
+            //     mem_process_seqs(&tmp_opt,
+            //                      aux->n_processed + n_sep[0],
+            //                      n_sep[1],
+            //                      sep[1],
+            //                      aux->pes0,
+            //                      w,
+            //                      0);
+                                
+            //     for (int i = 0; i < n_sep[1]; ++i)
+            //         ret->seqs[sep[1][i].id].sam = sep[1][i].sam;
+            // }
+            // free(sep[0]); free(sep[1]);
+        }
+        else {
+            /* pure (single/paired-end), reads processing */
+            // printf_(MY, "\tstart mem process seq for aln\n");
+            mem_process_seqs(opt,
+                             aux->n_processed,
+                             ret->n_seqs,
+                             ret->seqs,
+                             aux->pes0,
+                             w,
+                             2);
+        }
+        tprof[MEM_PROCESS2][0] += __rdtsc() - tim;
+        // printf_(MY, "kt_pipeline step2 end\n");
+        return ret;
+    }
+
+    /* Step 4: Write output */
+    else if (step == 3)
     {
         aux->n_processed += ret->n_seqs;
         uint64_t tim = __rdtsc();
@@ -861,10 +1038,10 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
         free(ret->seqs);
         free(ret);
         tprof[SAM_IO][0] += __rdtsc() - tim;
-
+        // printf_(MY, "kt_pipeline step3 end\n");
         return 0;
-    } // step 2
-    
+    }
+    printf_(MY, "kt_pipeline end\n");
     return 0;
 }
 
@@ -872,7 +1049,7 @@ static void *ktp_worker(void *data)
 {   
     ktp_worker_t *w = (ktp_worker_t*) data;
     ktp_t *p = w->pl;
-    
+    // printf_(MY, "\t[INIT 1] ktp_worker tid: %d init\n", w->i);
     while (w->step < p->n_steps) {
         // test whether we can kick off the job with this worker
         int pthread_ret = pthread_mutex_lock(&p->mutex);
@@ -893,7 +1070,11 @@ static void *ktp_worker(void *data)
         assert(pthread_ret == 0);
 
         // working on w->step
-        w->data = kt_pipeline(p->shared, w->step, w->step? w->data : 0, w->opt, *(w->w)); // for the first step, input is NULL
+        // printf_(MY, "\t[START %d%d%d%d] STEP %d%d%d%d\n",w->i, w->i, w->i, w->i, w->step, w->step, w->step, w->step);
+        // w->data = kt_pipeline(p->shared, w->step, w->step? w->data : 0, w->opt, *(w->w)); // for the first step, input is NULL
+        w->data = kt_pipeline(p->shared, w->step, w->step? w->data : 0, w->opt, w->w); // for the first step, input is NULL
+        // printf_(MY, "\t[END   %d%d%d%d] STEP %d%d%d%d\n",w->i, w->i, w->i, w->i, w->step, w->step, w->step, w->step);
+        // kt_pipeline(p->shared, w->step, w->step? w->data : 0, w->opt, *(w->w)); // for the first step, input is NULL
 
         // update step and let other workers know
         pthread_ret = pthread_mutex_lock(&p->mutex);
@@ -906,17 +1087,26 @@ static void *ktp_worker(void *data)
         pthread_ret = pthread_mutex_unlock(&p->mutex);
         assert(pthread_ret == 0);
     }
+    // printf_(MY,"\t[1111] ktp_worker end\n");
     pthread_exit(0);
 }
 
+// static two pipeline
 static int process(void *shared, gzFile gfp, gzFile gfp2, int pipe_threads, char* idx_prefix, int algo_num)
 {
     ktp_aux_t   *aux = (ktp_aux_t*) shared;
     worker_t     w;
+    /*-------------*/
+    worker_t w2;
+    worker_t w3;
+    /*-------------*/
+
     mem_opt_t   *opt = aux->opt;
     int32_t nthreads = opt->n_threads; // global variable for profiling!
     w.nthreads = opt->n_threads;
-    
+    w2.nthreads = opt->n_threads;
+    // w3.nthreads = opt->n_threads;
+    printf_(MY, "process start\n");
 #if NUMA_ENABLED
     int  deno = 1;
     int tc = numa_num_task_cpus();
@@ -1002,26 +1192,46 @@ static int process(void *shared, gzFile gfp, gzFile gfp2, int pipe_threads, char
     
     int32_t nreads = aux->actual_chunk_size/ READ_LEN + 10;
     
+    /* pipeline using pthreads */
+    ktp_t aux_;
+    int p_nt = pipe_threads; // 2;
+    // p_nt = 1;
+    // p_nt = 3;
+    // int n_steps = 3;
+    int n_steps = 4;
+
     /* All memory allocation */
     if (algo_num == 2) {
         memoryAllocErt(aux, w, nreads, nthreads, idx_prefix);
+        memoryAllocErt(aux, w2, nreads, nthreads, idx_prefix);
+        // memoryAllocErt(aux, w3, nreads, nthreads, idx_prefix);
     }
     else if (algo_num == 1){
         memoryAllocLearned(aux, w, nreads, nthreads, idx_prefix);
+        memoryAllocLearned(aux, w2, nreads, nthreads, idx_prefix);
+        // memoryAllocLearned(aux, w3, nreads, nthreads, idx_prefix);
     }
     else {
+        /*---------------------*/
+        memoryAlloc(aux, w2, nreads, nthreads);
+        // memoryAlloc(aux, w3, nreads, nthreads);
+        /*---------------------*/
         memoryAlloc(aux, w, nreads, nthreads);
     }
     fprintf(stderr, "* Threads used (compute): %d\n", nthreads);
     
-    /* pipeline using pthreads */
-    ktp_t aux_;
-    int p_nt = pipe_threads; // 2;
-    int n_steps = 3;
     
     w.ref_string = aux->ref_string;
     w.fmi = aux->fmi;
     w.nreads  = nreads;
+    /*----------------*/
+    w2.ref_string = aux->ref_string;
+    w2.fmi = aux->fmi;
+    w2.nreads  = nreads;
+    // w3.ref_string = aux->ref_string;
+    // w3.fmi = aux->fmi;
+    // w3.nreads  = nreads;
+    /*----------------*/
     // w.memSize = nreads;
     
     aux_.n_workers = p_nt;
@@ -1043,7 +1253,15 @@ static int process(void *shared, gzFile gfp, gzFile gfp2, int pipe_threads, char
         wr->index = aux_.index++;
         wr->i = i;
         wr->opt = opt;
-        wr->w = &w;
+        if (i == 0) {
+            wr->w = &w;
+        }
+        else if (i == 1) {
+            wr->w = &w2;
+        }
+        // else if (i == 2) {
+        //     wr->w = &w3;
+        // }
     }
     
     pthread_t *ptid = (pthread_t *) calloc(p_nt, sizeof(pthread_t));
@@ -1121,6 +1339,118 @@ static int process(void *shared, gzFile gfp, gzFile gfp2, int pipe_threads, char
             _mm_free(w.mmc.lim[l]);
         }
     }
+    /*-------------------------------------------------------*/
+    free(w2.chain_ar);
+    free(w2.regs);
+    free(w2.seedBuf);
+    
+    for(int l=0; l<nthreads; l++) {
+        _mm_free(w2.mmc.seqBufLeftRef[l*CACHE_LINE]);
+        _mm_free(w2.mmc.seqBufRightRef[l*CACHE_LINE]);
+        _mm_free(w2.mmc.seqBufLeftQer[l*CACHE_LINE]);
+        _mm_free(w2.mmc.seqBufRightQer[l*CACHE_LINE]);
+    }
+
+    for(int l=0; l<nthreads; l++) {
+        free(w2.mmc.seqPairArrayAux[l]);
+        free(w2.mmc.seqPairArrayLeft128[l]);
+        free(w2.mmc.seqPairArrayRight128[l]);
+    }
+
+    if (algo_num == 2) {
+#if MMAP_ERT_INDEX
+        closeMemoryMappedFile(&w2.kmerOffsetsFile);
+        closeMemoryMappedFile(&w2.mltTableFile);
+#else
+        free(w2.kmer_offsets);
+        free(w2.mlt_table);
+#endif
+        for (int i = 0 ; i < nthreads; ++i) {
+            kv_destroy(w2.smems[i * MAX_LINE_LEN]);
+            kv_destroy(w2.hits_ar[i * MAX_LINE_LEN]);
+            _mm_free(w2.mmc.lim[i]);
+        }
+        free(w2.smems);
+        free(w2.hits_ar);
+    }
+    else if (algo_num == 1){
+        free(w2.sa_position);
+        for (int i = 0 ; i < nthreads; ++i) {
+            kv_destroy(w2.l_smems[i * MAX_LINE_LEN]);
+            kv_destroy(w2.hits_ar[i * MAX_LINE_LEN]);
+            _mm_free(w2.mmc.lim[i]);
+        }
+        free(w2.l_smems);
+        free(w2.hits_ar);
+
+    }
+    else {
+        for(int l=0; l<nthreads; l++) {
+            _mm_free(w2.mmc.matchArray[l]);
+            free(w2.mmc.min_intv_ar[l]);
+            free(w2.mmc.query_pos_ar[l]);
+            free(w2.mmc.enc_qdb[l]);
+            free(w2.mmc.rid[l]);
+            _mm_free(w2.mmc.lim[l]);
+        }
+    }
+//     w2 = w3;
+//     free(w2.chain_ar);
+//     free(w2.regs);
+//     free(w2.seedBuf);
+    
+//     for(int l=0; l<nthreads; l++) {
+//         _mm_free(w2.mmc.seqBufLeftRef[l*CACHE_LINE]);
+//         _mm_free(w2.mmc.seqBufRightRef[l*CACHE_LINE]);
+//         _mm_free(w2.mmc.seqBufLeftQer[l*CACHE_LINE]);
+//         _mm_free(w2.mmc.seqBufRightQer[l*CACHE_LINE]);
+//     }
+
+//     for(int l=0; l<nthreads; l++) {
+//         free(w2.mmc.seqPairArrayAux[l]);
+//         free(w2.mmc.seqPairArrayLeft128[l]);
+//         free(w2.mmc.seqPairArrayRight128[l]);
+//     }
+
+//     if (algo_num == 2) {
+// #if MMAP_ERT_INDEX
+//         closeMemoryMappedFile(&w2.kmerOffsetsFile);
+//         closeMemoryMappedFile(&w2.mltTableFile);
+// #else
+//         free(w2.kmer_offsets);
+//         free(w2.mlt_table);
+// #endif
+//         for (int i = 0 ; i < nthreads; ++i) {
+//             kv_destroy(w2.smems[i * MAX_LINE_LEN]);
+//             kv_destroy(w2.hits_ar[i * MAX_LINE_LEN]);
+//             _mm_free(w2.mmc.lim[i]);
+//         }
+//         free(w2.smems);
+//         free(w2.hits_ar);
+//     }
+//     else if (algo_num == 1){
+//         free(w2.sa_position);
+//         for (int i = 0 ; i < nthreads; ++i) {
+//             kv_destroy(w2.l_smems[i * MAX_LINE_LEN]);
+//             kv_destroy(w2.hits_ar[i * MAX_LINE_LEN]);
+//             _mm_free(w2.mmc.lim[i]);
+//         }
+//         free(w2.l_smems);
+//         free(w2.hits_ar);
+
+//     }
+//     else {
+//         for(int l=0; l<nthreads; l++) {
+//             _mm_free(w2.mmc.matchArray[l]);
+//             free(w2.mmc.min_intv_ar[l]);
+//             free(w2.mmc.query_pos_ar[l]);
+//             free(w2.mmc.enc_qdb[l]);
+//             free(w2.mmc.rid[l]);
+//             _mm_free(w2.mmc.lim[l]);
+//         }
+//     }
+    /*-------------------------------------------------------*/
+    printf_(MY, "process end\n");
 
     return 0;
 }
@@ -1215,7 +1545,7 @@ int main_mem(int argc, char *argv[])
     ktp_aux_t     aux;
     bool          is_o    = 0;
     uint8_t      *ref_string;
-    
+    printf_(MY, "main_mem start\n");
     memset_s(&aux, sizeof(ktp_aux_t), 0);
     memset_s(pes, 4 * sizeof(mem_pestat_t), 0);
     for (i = 0; i < 4; ++i) pes[i].failed = 1;
@@ -1227,9 +1557,10 @@ int main_mem(int argc, char *argv[])
     
     /* Parse input arguments */
     // comment: added option '5' in the list
-    while ((c = getopt(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:Z:7")) >= 0)
+    while ((c = getopt(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:Z:7:0")) >= 0)
     {
         if (c == 'k') opt->min_seed_len = atoi(optarg), opt0.min_seed_len = 1;
+        else if (c == '0') opt->my = 1;
         else if (c == '1') no_mt_io = 1;
         else if (c == 'x') mode = optarg;
         else if (c == 'w') opt->w = atoi(optarg), opt0.w = 1;
@@ -1589,7 +1920,6 @@ int main_mem(int argc, char *argv[])
     tprof[MISC][1] = opt->chunk_size = aux.actual_chunk_size = aux.task_size;
 
     tim = __rdtsc();
-
     /* Relay process function */
     process(&aux, fp, fp2, no_mt_io? 1:2, idx_prefix, algo_num);
     
@@ -1619,7 +1949,7 @@ int main_mem(int argc, char *argv[])
     /* Display runtime profiling stats */
     tprof[MEM][0] = __rdtsc() - tprof[MEM][0];
     display_stats(nt);
-    
+    printf_(MY, "main_mem end\n");
     return 0;
 }
 
